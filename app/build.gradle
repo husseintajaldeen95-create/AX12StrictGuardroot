@@ -1,0 +1,17 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.ax12.strictguard'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.ax12.strictguard'
+        minSdk 26
+        targetSdk 32
+        versionCode 1
+        versionName '0.1.0-alpha'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
