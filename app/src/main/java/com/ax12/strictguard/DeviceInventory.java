@@ -95,7 +95,7 @@ public final class DeviceInventory {
             // Keep the row with more useful display information; never double-count it.
             if (previous == null || quality(device) > quality(previous)) online.put(device.mac, device);
         }
-        Set<String> trusted = MacPolicy.canonical(manualTrusted);
+        Set<String> trusted = MacPolicy.canonicalTrusted(manualTrusted);
         Set<String> all = new LinkedHashSet<>();
         all.addAll(allowed.keySet()); // Show ALL router allow entries first.
         all.addAll(online.keySet());  // Then unexpected connected clients.

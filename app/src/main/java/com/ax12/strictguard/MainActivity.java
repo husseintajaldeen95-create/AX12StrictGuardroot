@@ -19,6 +19,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -38,6 +39,7 @@ import java.nio.charset.StandardCharsets;
 public final class MainActivity extends Activity {
     private final Handler ui=new Handler(Looper.getMainLooper());
     private EditText hostField,passwordField,macField;
+    private CheckBox persistCredentialsCheck;
     private TextView trustedView,eventsView,statusView,authStateView,inventorySummaryView,inventoryMetaView;
     private LinearLayout inventoryRows;
     private TrustedStore store;
@@ -74,13 +76,18 @@ public final class MainActivity extends Activity {
         ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setPadding(20,20,20,25);col.setOrientation(LinearLayout.VERTICAL);
         col.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);scroll.addView(col);
         TextView title=text("AX12 STRICT GUARD",24,true); title.setTextColor(Color.rgb(18,94,122)); col.addView(title);
-        col.addView(text("الحارس المستقل للقائمة البيضاء – 0.1.6 device inventory / تجريبي",14,false));
+        col.addView(text("الحارس المستقل للقائمة البيضاء – 0.1.7 strict MAC / secure restart / تجريبي",14,false));
         col.addView(text("لا يُضاف أي MAC تلقائياً إلى قائمة الثقة. عند تشغيل الحارس تُراجع قائمة الراوتر كل 15 ثانية وتُزال الإدخالات غير المعتمدة.",14,false));
-        col.addView(text("مهم: لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص؛ ولا يمكن كشف انتحال MAC معتمد. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
+        col.addView(text("تُرفض عناوين MAC المحلية الإدارة (Private/Randomized) من قائمة الثقة. قبول MAC عالمي الإدارة لا يثبت أنه أصلي ولا يمنع انتحاله. لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
         col.addView(text("عنوان الراوتر المحلي",16,true));
         hostField=field("192.168.0.1",InputType.TYPE_CLASS_PHONE);hostField.setText(store.getHost());col.addView(hostField);
-        col.addView(text("كلمة مرور إدارة الراوتر (لن تُحفظ)",16,true));
+        col.addView(text("كلمة مرور إدارة الراوتر",16,true));
         passwordField=field("كلمة مرور الإدارة",InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD); col.addView(passwordField);
+        persistCredentialsCheck = new CheckBox(this);
+        persistCredentialsCheck.setText("السماح باستعادة المراقبة إذا أوقف Android عملية التطبيق. تُحفظ كلمة المرور مشفرة بمفتاح Android Keystore غير قابل للتصدير؛ لا تُحفظ كنص صريح.");
+        persistCredentialsCheck.setChecked(CredentialVault.hasSavedCredential(this));
+        col.addView(persistCredentialsCheck);
+        col.addView(button("حذف كلمة المرور المشفرة المحفوظة", this::clearSavedCredential));
         col.addView(button("فحص بروتوكول الراوتر دون تسجيل الدخول",this::probeCompatibility));
         col.addView(button("1. اختبار الاتصال (قراءة فقط)",this::testConnection));
         col.addView(text("حالة المصادقة: المهلة المعروضة للتطبيق فقط، ولا تؤكد زمن الحظر في الراوتر.",13,true));
@@ -110,14 +117,26 @@ public final class MainActivity extends Activity {
         setContentView(scroll);updateLists();
     }
     private void updateLists(){
-        try {StringBuilder b=new StringBuilder("قائمتك المعتمدة ("+store.get().size()+"):\n");
-            for(String mac:store.get())b.append("• ").append(mac).append('\n');trustedView.setText(b.toString());}
-        catch(Exception e){trustedView.setText("خطأ في قائمة الثقة: "+e.getMessage());}
+        try {
+            List<String> stored = store.getStoredForReview();
+            int rejected = 0;
+            StringBuilder b = new StringBuilder("عناوين MAC المحفوظة (" + stored.size() + "):\n");
+            for (String mac : stored) {
+                boolean local = MacPolicy.locallyAdministered(mac);
+                if (local) rejected++;
+                b.append("• ").append(mac)
+                        .append(local ? " — مرفوض: MAC محلي الإدارة؛ احذفه من القائمة" : " — صالح للاعتماد")
+                        .append('\n');
+            }
+            if (rejected > 0) b.append("\nتنبيه: توجد ").append(rejected)
+                    .append(" عناوين Private/Randomized قديمة. لن يبدأ الحارس حتى حذفها.");
+            trustedView.setText(b.toString());
+        } catch(Exception e){trustedView.setText("خطأ في قائمة الثقة: "+e.getMessage());}
         eventsView.setText(log.text());
         if (authStateView != null) authStateView.setText(AuthAttemptGate.status(this));
     }
     private void copyTrustedList() {
-        Set<String> macs = store.get();
+        Set<String> macs = new java.util.LinkedHashSet<>(store.getStoredForReview());
         if (macs.isEmpty()) {error("القائمة المحلية فارغة، فلا توجد عناوين للنسخ.");return;}
         StringBuilder lines = new StringBuilder();
         for (String mac : macs) lines.append(mac).append('\n');
@@ -134,7 +153,7 @@ public final class MainActivity extends Activity {
         input.setMinLines(5);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         new AlertDialog.Builder(this).setTitle("استيراد MAC محلي فقط")
-            .setMessage("ستُضاف هذه العناوين إلى قائمة الثقة المحلية بعد التحقق من صيغتها. لن يتم إرسال أي شيء إلى الراوتر.")
+            .setMessage("ستُضاف فقط عناوين MAC العالمية الإدارة (UAA). ستُرفض عناوين Private/Randomized المحلية الإدارة. لن يتم إرسال أي شيء إلى الراوتر.")
             .setView(input).setPositiveButton("تحقق واستورد", (d, w) -> {
                 try {
                     String all = input.getText().toString().trim();
@@ -142,7 +161,7 @@ public final class MainActivity extends Activity {
                     String[] tokens = all.split("[,;\\s]+");
                     if (tokens.length > 128) throw new IllegalArgumentException("عدد العناوين كبير جداً");
                     List<String> list = new ArrayList<>();
-                    for (String part : tokens) list.add(MacPolicy.normalize(part));
+                    for (String part : tokens) list.add(MacPolicy.normalizeTrusted(part));
                     store.addAll(list);
                     log.add("استيراد يدوي محلي: " + list.size() + " عنوان MAC؛ دون اتصال بالراوتر");
                     updateLists();renderInventory();
@@ -156,13 +175,12 @@ public final class MainActivity extends Activity {
         updateLists();
     }
     private String selectedMac(){return MacPolicy.normalize(macField.getText().toString());}
+    private String selectedTrustedMac(){return MacPolicy.normalizeTrusted(macField.getText().toString());}
     private void addMac(){try{
-        String m=selectedMac();
-        if(MacPolicy.locallyAdministered(m))new AlertDialog.Builder(this).setTitle("تنبيه MAC محلي")
-           .setMessage("هذا العنوان محلي الإدارة وقد يكون عشوائياً. السماح به لا يثبت هوية الجهاز. هل اعتمدته يدوياً؟")
-           .setPositiveButton("أعتمده",(d,w)->{store.add(m);log.add("اعتماد يدوي: "+m);updateLists();renderInventory();})
-           .setNegativeButton("إلغاء",null).show();
-        else {store.add(m);log.add("اعتماد يدوي: "+m);updateLists();renderInventory();}
+        String mac=selectedTrustedMac();
+        store.add(mac);
+        log.add("اعتماد MAC عالمي الإدارة يدوياً: "+mac);
+        updateLists();renderInventory();
     }catch(Exception e){error(e.getMessage());}}
     private void removeMac(){try{
         String m=selectedMac();new AlertDialog.Builder(this).setTitle("إزالة اعتماد MAC")
@@ -228,7 +246,7 @@ public final class MainActivity extends Activity {
         try {
             if(GuardService.isRunning() || testingConnection || probingCompatibility || loadingInventory || modifyingRouter)
                 throw new IllegalStateException("أوقف المراقبة والفحوص الجارية قبل إرسال MAC إلى الراوتر");
-            requirePassword();String mac=selectedMac();
+            requirePassword();String mac=selectedTrustedMac();
             if(!store.get().contains(mac))throw new IllegalArgumentException("اعتمد MAC محلياً قبل إرساله");
             String host=routerHost(),pass=passwordField.getText().toString();
             requireSuccessfulReadTest(host,pass);
@@ -268,7 +286,7 @@ public final class MainActivity extends Activity {
                     Map<String,String> allowed=client.readAllowedWithNames();
                     RouterClient.ConnectedSnapshot connected=client.readConnectedDevices();
                     // Validate all MACs and the comparison before publishing data.
-                    DeviceInventory.compare(allowed, connected.devices, store.get());
+                    DeviceInventory.compare(allowed, connected.devices, store.getValid());
                     ui.post(()->{
                         lastRouterAllowed=new LinkedHashMap<>(allowed);
                         lastConnected=new ArrayList<>(connected.devices);
@@ -302,7 +320,7 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            DeviceInventory.Report report=DeviceInventory.compare(lastRouterAllowed,lastConnected,store.get());
+            DeviceInventory.Report report=DeviceInventory.compare(lastRouterAllowed,lastConnected,store.getValid());
             String time=DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.SHORT,Locale.getDefault())
                     .format(new Date(lastSnapshotTime));
             boolean sameHost=lastSnapshotHost.equals(hostField.getText().toString().trim());
@@ -357,7 +375,7 @@ public final class MainActivity extends Activity {
         else if (d.trustedLocally && !d.allowedByRouter)
             card.addView(text("هذا MAC معتمد محلياً لكنه غير مدرج في قائمة سماح الراوتر.",12,false));
         if (d.locallyAdministered)
-            card.addView(text("ملاحظة: MAC محلي الإدارة وقد يكون عشوائياً؛ لا يمكن إثبات أصل MAC من العنوان وحده.",12,true));
+            card.addView(text("مرفوض في قائمة الثقة: هذا MAC محلي الإدارة (Private/Randomized محتمل). لا يمكن إثبات أصالة أي MAC عالمي الإدارة من العنوان وحده.",12,true));
     }
 
     private void requireSuccessfulReadTest(String host,String password){
@@ -379,16 +397,42 @@ public final class MainActivity extends Activity {
             requirePassword();String host=routerHost();if(store.get().isEmpty())throw new IllegalStateException("أدخل عنوان MAC معتمداً واحداً على الأقل بما فيه جهاز الإدارة");
             String password=passwordField.getText().toString();
             requireSuccessfulReadTest(host,password);
+            boolean persistent = persistCredentialsCheck != null && persistCredentialsCheck.isChecked();
+            String persistenceNote = persistent
+                    ? "\n\nوافقت على حفظ كلمة مرور الإدارة مشفرة في Android Keystore لاستعادة الخدمة إذا أوقف Android عملية التطبيق. لن تُحفظ كنص صريح، وستُمسح عند إيقاف الحارس أو انتهاء جلسة الحماية."
+                    : "\n\nلم تختر حفظ كلمة المرور. ستواصل خدمة Foreground العمل عند إغلاق واجهة التطبيق ما دام Android يبقي الخدمة حية، لكن لن يمكن استعادتها تلقائياً إذا أنهى النظام عملية الخدمة.";
             new AlertDialog.Builder(this).setTitle("تشغيل الحارس")
-              .setMessage("يتطلب نجاح اختبار الاتصال والقراءة أولاً، وتفعيل Allow List مسبقاً في الراوتر. سيحذف الحارس عنواناً واحداً غير معتمد في كل دورة، وقد ينقطع اتصال الأجهزة غير المدرجة. تأكد أن MAC جهاز الإدارة ضمن قائمتك. إذا ظهر HTTP 403 فلا تشغّل الحارس.")
+              .setMessage("يتطلب نجاح اختبار الاتصال والقراءة أولاً، وتفعيل Allow List مسبقاً في الراوتر. سيحذف الحارس عنواناً واحداً غير معتمد في كل دورة، وقد ينقطع اتصال الأجهزة غير المدرجة. تأكد أن MAC جهاز الإدارة ضمن قائمتك. إذا ظهر HTTP 403 فلا تشغّل الحارس.\n\nلا يمكن منع انتحال MAC معتمد اعتماداً على عنوان MAC وحده." + persistenceNote)
               .setPositiveButton("تشغيل",(d,w)->{
                   Intent i=new Intent(this,GuardService.class);i.setAction(GuardService.START);
                   i.putExtra(GuardService.EXTRA_HOST,host);i.putExtra(GuardService.EXTRA_PASS,password);
+                  i.putExtra(GuardService.EXTRA_PERSISTENT,persistent);
                   startForegroundService(i);passwordField.setText("");statusView.setText("طلب تشغيل الحارس أُرسل؛ تحقق من السجل");
               }).setNegativeButton("إلغاء",null).show();
         }catch(Exception e){error(e.getMessage());}
     }
-    private void stopGuard(){Intent i=new Intent(this,GuardService.class);i.setAction(GuardService.STOP);startService(i);statusView.setText("طُلب إيقاف المراقبة");}
+    private void stopGuard(){
+        CredentialVault.clear(this);
+        Intent i=new Intent(this,GuardService.class);i.setAction(GuardService.STOP);startService(i);
+        if (persistCredentialsCheck != null) persistCredentialsCheck.setChecked(false);
+        statusView.setText("طُلب إيقاف المراقبة وحذف بيانات الاستعادة المشفرة");
+    }
+
+    private void clearSavedCredential() {
+        if (GuardService.isRunning()) {
+            error("أوقف المراقبة أولاً؛ لا يمكن حذف بيانات الاستعادة بينما الخدمة تستخدم جلسة الإدارة.");
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("حذف كلمة المرور المحفوظة")
+                .setMessage("سيتم حذف النص المشفر ومفتاحه من Android Keystore. لن يستطيع التطبيق استعادة المراقبة تلقائياً بعد ذلك.")
+                .setPositiveButton("حذف", (dialog, which) -> {
+                    CredentialVault.clear(this);
+                    if (persistCredentialsCheck != null) persistCredentialsCheck.setChecked(false);
+                    log.add("حُذفت كلمة مرور الاستعادة المشفرة ومفتاح Android Keystore");
+                    updateLists();
+                })
+                .setNegativeButton("إلغاء", null).show();
+    }
     @Override protected void onResume(){super.onResume();ui.removeCallbacks(refresh);ui.post(refresh);}
     @Override protected void onPause(){ui.removeCallbacks(refresh);super.onPause();}
 }

@@ -659,7 +659,7 @@ public final class RouterClient {
     }
 
     public void allowObserved(String mac) throws Exception {
-        String target = MacPolicy.normalize(mac);
+        String target = MacPolicy.normalizeTrusted(mac);
         List<JSONObject> entries = rows(api("white_devices", "load", formEmpty()));
         for (int i = 0; i < entries.size(); i++) {
             if (target.equals(rowMac(entries.get(i)))) {

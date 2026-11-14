@@ -58,6 +58,8 @@ public final class DeviceInventoryTest {
         DeviceInventory.ConnectedDevice cleaned=online(a,"\nFriendly\tName", "192.168.0.1", "5G");
         check(!cleaned.name.contains("\n") && !cleaned.name.contains("\t"),"control characters sanitized");
         invalidConnected("\n");invalidConnected("FF:FF:FF:FF:FF:FF");
+        try { DeviceInventory.compare(Collections.emptyMap(),Collections.emptyList(),Arrays.asList("1A:E5:F2:25:1C:5B"));throw new AssertionError("accepted randomized MAC in trusted list"); }
+        catch (IllegalArgumentException expected) { checks++; }
         try { DeviceInventory.compare(null,Collections.emptyList(),Collections.emptyList());throw new AssertionError("accepted null snapshot"); }
         catch (IllegalArgumentException expected) { checks++; }
         try { DeviceInventory.compare(Collections.emptyMap(),Arrays.asList((DeviceInventory.ConnectedDevice)null),Collections.emptyList());throw new AssertionError("accepted null client"); }
