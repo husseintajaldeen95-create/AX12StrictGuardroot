@@ -116,6 +116,10 @@ public final class GuardService extends Service {
                     String msg=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
                     log.add("تعذر فحص الحماية: "+msg);
                     update("تعذر التحقق من الراوتر: راجع سجل الأحداث");
+                    if (client.isSessionInvalid()) {
+                        log.add("انتهت موثوقية جلسة الإدارة بعد خطأ قراءة/توقيع. أوقفت المراقبة دون إعادة اتصال أو Logout.");
+                        break;
+                    }
                     if(AuthAttemptPolicy.isDenied(msg)) {
                         log.add("رفض الراوتر جلسة الإدارة. أوقفت المراقبة فوراً دون أي إعادة دخول تلقائية.");
                         break;

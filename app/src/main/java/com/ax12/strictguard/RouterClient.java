@@ -42,6 +42,9 @@ public final class RouterClient {
     private final String host;
     private final Context appContext;
     private boolean ownsLoginGate;
+    // Any failed authenticated request leaves the router session state uncertain.
+    // The client must never send another request (including logout) with it.
+    private boolean sessionInvalid;
     private String token;
     private String password; // in-memory only; cleared by close()
     private final Map<String, String> cookies = new LinkedHashMap<>();
@@ -115,20 +118,25 @@ public final class RouterClient {
 
     /** Read-only probe, does NOT submit a password or create an administrator session. */
     public String probeCompatibility() throws Exception {
-        String raw = postRaw("device_config?form=config", encodeForm(form("operation", "read")), true, false);
-        JSONObject root;
-        try { root = new JSONObject(raw); }
-        catch (JSONException e) { throw new IllegalStateException("ردّ الفحص ليس JSON؛ لا يمكن تأكيد نوع المصادقة دون فحص أدق", e); }
-        JSONObject data = root.optJSONObject("data");
-        JSONArray cert = data == null ? null : data.optJSONArray("certification");
-        if (cert == null)
-            return "استجاب الراوتر، لكنه لم يعلن شهادة بروتوكول المصادقة. لا يمكن اعتبار وضع RSA التقليدي مؤكداً.";
-        for (int i = 0; i < cert.length(); i++) {
-            String item = cert.optString(i, "").trim().toUpperCase(Locale.ROOT);
-            if ("EU CE RED".equals(item) || "SG CLS L1 STAGE2".equals(item))
-                return "أعلن الراوتر شهادة SG/CE RED؛ ما زال التوافق الفعلي للتوقيع بحاجة إلى تحقق.";
+        AuthAttemptGate.beginProbe();
+        try {
+            String raw = postRaw("device_config?form=config", encodeForm(form("operation", "read")), true, false);
+            JSONObject root;
+            try { root = new JSONObject(raw); }
+            catch (JSONException e) { throw new IllegalStateException("ردّ الفحص ليس JSON؛ لا يمكن تأكيد نوع المصادقة دون فحص أدق", e); }
+            JSONObject data = root.optJSONObject("data");
+            JSONArray cert = data == null ? null : data.optJSONArray("certification");
+            if (cert == null)
+                return "استجاب الراوتر، لكنه لم يعلن شهادة بروتوكول المصادقة. لا يمكن اعتبار وضع RSA التقليدي مؤكداً.";
+            for (int i = 0; i < cert.length(); i++) {
+                String item = cert.optString(i, "").trim().toUpperCase(Locale.ROOT);
+                if ("EU CE RED".equals(item) || "SG CLS L1 STAGE2".equals(item))
+                    return "أعلن الراوتر شهادة SG/CE RED؛ ما زال التوافق الفعلي للتوقيع بحاجة إلى تحقق.";
+            }
+            return "استجاب الراوتر، ولم يعلن SG/CE RED ضمن الشهادات المعروفة؛ لم يثبت بذلك نوع المصادقة.";
+        } finally {
+            AuthAttemptGate.endProbe();
         }
-        return "استجاب الراوتر، ولم يعلن SG/CE RED ضمن الشهادات المعروفة؛ لم يثبت بذلك نوع المصادقة.";
     }
 
     public String getProtocolName() {
@@ -328,24 +336,25 @@ public final class RouterClient {
     }
 
     private JSONObject requestEnhanced(String path, Map<String, String> values) throws Exception {
+        if (sessionInvalid) throw new IllegalStateException("جلسة الراوتر غير موثوقة بعد فشل طلب سابق؛ لن يُرسل طلب آخر");
         if (aesKey == null || aesIv == null || rollingHash == null)
             throw new IllegalStateException("جلسة SG غير مكتملة");
-        String plaintext = encodeForm(values);
-        String encryptedData = aesEncrypt(plaintext);
-        rollingHash = sha256Hex(encryptedData.getBytes(StandardCharsets.UTF_8));
-        String signature = hmacSignature(encryptedData.length());
-        String body = "sign=" + signature + "&data=" + URLEncoder.encode(encryptedData, "UTF-8");
-        String raw = postRaw(path, body, false, false);
-
-        JSONObject wrapper;
         try {
-            wrapper = new JSONObject(raw);
-            String decodedText = aesDecrypt(wrapper.getString("data"));
-            JSONObject decoded = new JSONObject(decodedText);
+            String plaintext = encodeForm(values);
+            String encryptedData = aesEncrypt(plaintext);
+            rollingHash = sha256Hex(encryptedData.getBytes(StandardCharsets.UTF_8));
+            String signature = hmacSignature(encryptedData.length());
+            String body = "sign=" + signature + "&data=" + URLEncoder.encode(encryptedData, "UTF-8");
+            String raw = postRaw(path, body, false, false);
+            JSONObject wrapper = new JSONObject(raw);
+            JSONObject decoded = new JSONObject(aesDecrypt(wrapper.getString("data")));
             requireSuccess(decoded, path);
             return decoded;
-        } catch (JSONException e) {
-            throw new IllegalStateException("تعذر فك استجابة الراوتر المشفرة أثناء " + path + ": " + compact(raw, 180), e);
+        } catch (Exception e) {
+            // Even a network timeout can leave the encrypted signing state ambiguous.
+            // Don't retry within this session and don't send logout afterwards.
+            sessionInvalid = true;
+            throw e;
         }
     }
 
@@ -445,9 +454,15 @@ public final class RouterClient {
     private static void requireSuccess(JSONObject response, String path) {
         Object success = response.opt("success");
         if (Boolean.TRUE.equals(success) || (success instanceof Number && ((Number) success).intValue() == 1)) return;
-        String error = firstNonEmpty(response, "errorcode", "errorCode", "error_code", "error");
+        // Some firmwares put errorcode under data, others at response root.
+        // Do not print raw router responses because they may contain session secrets.
+        String error = firstNonEmpty(response, "errorcode", "errorCode", "error_code", "error", "msg");
+        JSONObject details = response.optJSONObject("data");
+        if ("unknown".equals(error) && details != null)
+            error = firstNonEmpty(details, "errorcode", "errorCode", "error_code", "error", "msg");
         String detail = error.toLowerCase(Locale.ROOT).contains("exceeded max attempts")
-                ? "exceeded max attempts" : "رفض المصادقة/الطلب";
+                ? "exceeded max attempts"
+                : (error.matches("[+-]?[0-9]{1,10}") ? "errorcode=" + error : "رفض المصادقة/الطلب");
         throw new IllegalStateException("رفض الراوتر الطلب أثناء " + path + " (" + detail + ")؛ لا تكرر المحاولة قبل تشخيص التوافق");
     }
 
@@ -466,18 +481,24 @@ public final class RouterClient {
     }
 
     private JSONObject api(String formName, String operation, Map<String, String> data) throws Exception {
+        if (sessionInvalid)
+            throw new IllegalStateException("جلسة الراوتر غير موثوقة بعد فشل سابق؛ أُلغيت كل الطلبات التالية");
         Map<String, String> fields = form("operation", operation);
         fields.putAll(data);
         try {
             if (enhancedMode) return requestEnhanced(PATH + "?form=" + formName, fields);
             return requestPlain(PATH + "?form=" + formName, fields, false, false);
         } catch (Exception e) {
-            // Never auto-login again after a failed read/write. The router can count
-            // each attempt and lock out this client even while browser login works.
+            // Any failed authenticated API request invalidates the local session.
+            // Never retry it automatically or send a logout using possibly stale crypto state.
+            sessionInvalid = true;
             AuthAttemptGate.markDenied(appContext, e);
             throw e;
         }
     }
+
+    /** True means another network request on this session would be unsafe. */
+    public boolean isSessionInvalid() { return sessionInvalid; }
 
     public static final class Settings {
         public final boolean enabled;
@@ -580,6 +601,7 @@ public final class RouterClient {
     }
 
     private void clearSession() {
+        sessionInvalid = false;
         token = null;
         password = null;
         cookies.clear();
@@ -595,7 +617,7 @@ public final class RouterClient {
     public void close() {
         // Best-effort logout frees the router's single administrator session before
         // the next read test or foreground monitor starts. Failure is non-fatal.
-        if (token != null) {
+        if (token != null && !sessionInvalid) {
             try {
                 Map<String, String> body = form("operation", "write");
                 if (enhancedMode) requestEnhanced("admin/system?form=logout", body);

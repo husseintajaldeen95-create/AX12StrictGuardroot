@@ -36,6 +36,15 @@ public final class AuthAttemptGate {
         occupied = true;
     }
 
+    /** Read-only compatibility checks share the same single-flight gate. */
+    public static synchronized void beginProbe() {
+        if (occupied) throw new IllegalStateException(
+                "طلب إدارة آخر قيد التنفيذ؛ لن يتداخل فحص البروتوكول مع تسجيل الدخول");
+        occupied = true;
+    }
+
+    public static synchronized void endProbe() { occupied = false; }
+
     public static synchronized void succeeded(Context context) {
         prefs(context).edit().remove(RETRY_AFTER).putLong(LAST_SUCCESS, System.currentTimeMillis())
                 .putLong(SERVER_RETRY_SECONDS, -1L).commit();

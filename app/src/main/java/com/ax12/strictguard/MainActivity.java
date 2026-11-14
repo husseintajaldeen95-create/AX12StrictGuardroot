@@ -37,6 +37,7 @@ public final class MainActivity extends Activity {
     private GuardLog log;
     private boolean routerReadTestPassed=false;
     private boolean testingConnection=false;
+    private boolean probingCompatibility=false;
     private String testedHost;
     private String testedPasswordFingerprint;
     private final Runnable refresh=new Runnable(){@Override public void run(){
@@ -59,7 +60,7 @@ public final class MainActivity extends Activity {
         ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setPadding(20,20,20,25);col.setOrientation(LinearLayout.VERTICAL);
         col.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);scroll.addView(col);
         TextView title=text("AX12 STRICT GUARD",24,true); title.setTextColor(Color.rgb(18,94,122)); col.addView(title);
-        col.addView(text("الحارس المستقل للقائمة البيضاء – إصدار تجريبي للاختبار",14,false));
+        col.addView(text("الحارس المستقل للقائمة البيضاء – 0.1.4 safety / تجريبي",14,false));
         col.addView(text("لا يُضاف أي MAC تلقائياً إلى قائمة الثقة. عند تشغيل الحارس تُراجع قائمة الراوتر كل 15 ثانية وتُزال الإدخالات غير المعتمدة.",14,false));
         col.addView(text("مهم: لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص؛ ولا يمكن كشف انتحال MAC معتمد. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
         col.addView(text("عنوان الراوتر المحلي",16,true));
@@ -152,9 +153,10 @@ public final class MainActivity extends Activity {
     private void error(String s){new AlertDialog.Builder(this).setTitle("تنبيه").setMessage(s).setPositiveButton("موافق",null).show();}
     private void probeCompatibility() {
         try {
-            if (GuardService.isRunning() || testingConnection)
-                throw new IllegalStateException("أوقف المراقبة أو اختبار الدخول أولاً");
+            if (GuardService.isRunning() || testingConnection || probingCompatibility)
+                throw new IllegalStateException("أوقف المراقبة أو أي فحص جارٍ أولاً");
             String host=routerHost();
+            probingCompatibility = true;
             statusView.setText("جارٍ فحص التهيئة دون إرسال كلمة مرور...");
             new Thread(() -> {
                 try {
@@ -163,13 +165,15 @@ public final class MainActivity extends Activity {
                 } catch(Exception e) {
                     String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
                     ui.post(() -> {statusView.setText("فشل فحص البروتوكول دون تسجيل دخول");log.add("تشخيص بلا كلمة مرور: " + message);updateLists();});
+                } finally {
+                    ui.post(() -> probingCompatibility = false);
                 }
             },"AX12-NoLoginProbe").start();
         } catch(Exception e) {error(e.getMessage());}
     }
     private void testConnection(){
         try{
-            if (testingConnection) throw new IllegalStateException("اختبار الدخول جارٍ بالفعل؛ لا تكرر الضغط");
+            if (testingConnection || probingCompatibility) throw new IllegalStateException("اختبار آخر جارٍ بالفعل؛ لا تكرر الضغط");
             if(GuardService.isRunning())throw new IllegalStateException("أوقف المراقبة أولاً قبل إجراء اختبار اتصال جديد حتى لا تتعارض جلستا الإدارة");
             requirePassword();String host=routerHost(),pwd=passwordField.getText().toString();
             routerReadTestPassed=false;testedHost=null;testedPasswordFingerprint=null;
@@ -200,7 +204,8 @@ public final class MainActivity extends Activity {
     }
     private void confirmAllow(){
         try {
-            if(GuardService.isRunning())throw new IllegalStateException("أوقف المراقبة أولاً قبل إرسال MAC إلى الراوتر");
+            if(GuardService.isRunning() || testingConnection || probingCompatibility)
+                throw new IllegalStateException("أوقف المراقبة والفحوص الجارية قبل إرسال MAC إلى الراوتر");
             requirePassword();String mac=selectedMac();
             if(!store.get().contains(mac))throw new IllegalArgumentException("اعتمد MAC محلياً قبل إرساله");
             String host=routerHost(),pass=passwordField.getText().toString();
@@ -234,7 +239,8 @@ public final class MainActivity extends Activity {
     }
     private void startGuard(){
         try {
-            if(GuardService.isRunning())throw new IllegalStateException("المراقبة تعمل بالفعل");
+            if(GuardService.isRunning() || testingConnection || probingCompatibility)
+                throw new IllegalStateException("المراقبة أو اختبار اتصال آخر قيد التنفيذ");
             requirePassword();String host=routerHost();if(store.get().isEmpty())throw new IllegalStateException("أدخل عنوان MAC معتمداً واحداً على الأقل بما فيه جهاز الإدارة");
             String password=passwordField.getText().toString();
             requireSuccessfulReadTest(host,password);
