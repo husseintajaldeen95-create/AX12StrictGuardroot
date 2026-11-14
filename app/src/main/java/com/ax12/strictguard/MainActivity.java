@@ -4,6 +4,9 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -20,6 +23,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 
@@ -27,7 +32,7 @@ import java.nio.charset.StandardCharsets;
 public final class MainActivity extends Activity {
     private final Handler ui=new Handler(Looper.getMainLooper());
     private EditText hostField,passwordField,macField;
-    private TextView trustedView,eventsView,statusView;
+    private TextView trustedView,eventsView,statusView,authStateView;
     private TrustedStore store;
     private GuardLog log;
     private boolean routerReadTestPassed=false;
@@ -63,10 +68,15 @@ public final class MainActivity extends Activity {
         passwordField=field("كلمة مرور الإدارة",InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD); col.addView(passwordField);
         col.addView(button("فحص بروتوكول الراوتر دون تسجيل الدخول",this::probeCompatibility));
         col.addView(button("1. اختبار الاتصال (قراءة فقط)",this::testConnection));
+        col.addView(text("حالة المصادقة: المهلة المعروضة للتطبيق فقط، ولا تؤكد زمن الحظر في الراوتر.",13,true));
+        authStateView=text("",13,false);col.addView(authStateView);
+        col.addView(button("عرض وقت آخر رفض ومهلة التطبيق دون اتصال بالراوتر",this::showAuthStatus));
         col.addView(text("أضف عناوين MAC المعتمدة يدوياً",16,true));
         macField=field("AA:BB:CC:DD:EE:FF",InputType.TYPE_CLASS_TEXT);col.addView(macField);
         col.addView(button("إضافة MAC للقائمة المعتمدة محلياً",this::addMac));
         col.addView(button("حذف MAC من القائمة المعتمدة محلياً",this::removeMac));
+        col.addView(button("نسخ قائمة الثقة للاحتفاظ بها قبل إعادة تثبيت APK",this::copyTrustedList));
+        col.addView(button("استيراد قائمة MAC محفوظة من نص",this::importTrustedList));
         col.addView(button("إرسال MAC معتمد إلى الراوتر (بموافقة صريحة)",this::confirmAllow));
         trustedView=text("",15,false);col.addView(trustedView);
         col.addView(button("2. تشغيل المراقبة الصارمة",this::startGuard));
@@ -81,6 +91,46 @@ public final class MainActivity extends Activity {
             for(String mac:store.get())b.append("• ").append(mac).append('\n');trustedView.setText(b.toString());}
         catch(Exception e){trustedView.setText("خطأ في قائمة الثقة: "+e.getMessage());}
         eventsView.setText(log.text());
+        if (authStateView != null) authStateView.setText(AuthAttemptGate.status(this));
+    }
+    private void copyTrustedList() {
+        Set<String> macs = store.get();
+        if (macs.isEmpty()) {error("القائمة المحلية فارغة، فلا توجد عناوين للنسخ.");return;}
+        StringBuilder lines = new StringBuilder();
+        for (String mac : macs) lines.append(mac).append('\n');
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null) {error("الحافظة غير متاحة");return;}
+        clipboard.setPrimaryClip(ClipData.newPlainText("AX12 trusted MACs", lines.toString()));
+        error("تم نسخ عناوين MAC فقط. الصقها في ملاحظة أو ملف نصي قبل حذف أي نسخة من التطبيق. لم تُنسخ كلمة المرور.");
+    }
+
+    private void importTrustedList() {
+        EditText input = new EditText(this);
+        input.setHint("الصق عنوان MAC واحداً في كل سطر");
+        input.setSingleLine(false);
+        input.setMinLines(5);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        new AlertDialog.Builder(this).setTitle("استيراد MAC محلي فقط")
+            .setMessage("ستُضاف هذه العناوين إلى قائمة الثقة المحلية بعد التحقق من صيغتها. لن يتم إرسال أي شيء إلى الراوتر.")
+            .setView(input).setPositiveButton("تحقق واستورد", (d, w) -> {
+                try {
+                    String all = input.getText().toString().trim();
+                    if (all.isEmpty()) throw new IllegalArgumentException("لم تُدخل أي عنوان MAC");
+                    String[] tokens = all.split("[,;\\s]+");
+                    if (tokens.length > 128) throw new IllegalArgumentException("عدد العناوين كبير جداً");
+                    List<String> list = new ArrayList<>();
+                    for (String part : tokens) list.add(MacPolicy.normalize(part));
+                    store.addAll(list);
+                    log.add("استيراد يدوي محلي: " + list.size() + " عنوان MAC؛ دون اتصال بالراوتر");
+                    updateLists();
+                } catch (Exception e) {error("تعذر الاستيراد: " + e.getMessage());}
+            }).setNegativeButton("إلغاء", null).show();
+    }
+
+    private void showAuthStatus() {
+        String status = AuthAttemptGate.status(this);
+        statusView.setText(status);
+        updateLists();
     }
     private String selectedMac(){return MacPolicy.normalize(macField.getText().toString());}
     private void addMac(){try{

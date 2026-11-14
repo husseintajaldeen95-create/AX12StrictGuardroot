@@ -11,6 +11,14 @@ public final class AuthAttemptPolicyTest {
         ok(AuthAttemptPolicy.cooldownMs("bad format") == 120000L, "2-minute cooldown");
         ok(AuthAttemptPolicy.remainingMs(1000L, 5000L) == 4000L, "remaining correctly computed");
         ok(AuthAttemptPolicy.remainingMs(6000L, 5000L) == 0L, "expired is zero");
+        ok(AuthAttemptPolicy.parseServerRetrySeconds("600") == 600L, "parse numeric Retry-After");
+        ok(AuthAttemptPolicy.parseServerRetrySeconds("Sat, 14 Nov 2026 12:00:00 GMT") == -1L,
+                "date Retry-After must not be guessed");
+        ok(AuthAttemptPolicy.parseServerRetrySeconds("86401") == -1L, "reject suspicious Retry-After");
+        ok(AuthAttemptPolicy.serverRetrySecondsFromError("HTTP 403 [router-retry-seconds:180]") == 180L,
+                "extract router supplied retry hint");
+        ok(AuthAttemptPolicy.serverRetrySecondsFromError("exceeded max attempts") == -1L,
+                "never invent router lockout duration");
         System.out.println("PASS: " + count + " AuthAttemptPolicy tests");
     }
 }

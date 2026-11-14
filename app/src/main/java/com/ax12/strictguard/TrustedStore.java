@@ -30,6 +30,13 @@ public final class TrustedStore {
         java.util.LinkedHashSet<String> copy = new java.util.LinkedHashSet<>(get());
         copy.add(MacPolicy.normalize(mac)); save(copy);
     }
+    /** Validate ALL MACs before changing the local trust store. Never writes to router. */
+    public synchronized void addAll(java.util.Collection<String> macs) {
+        java.util.LinkedHashSet<String> validated = new java.util.LinkedHashSet<>(get());
+        for (String mac : macs) validated.add(MacPolicy.normalize(mac));
+        if (validated.size() > 128) throw new IllegalArgumentException("القائمة كبيرة على نحو غير متوقع");
+        save(validated);
+    }
     public synchronized void remove(String mac) {
         java.util.LinkedHashSet<String> copy = new java.util.LinkedHashSet<>(get());
         copy.remove(MacPolicy.normalize(mac)); save(copy);

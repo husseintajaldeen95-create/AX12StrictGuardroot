@@ -7,8 +7,8 @@ android {
         applicationId 'com.ax12.strictguard'
         minSdk 26
         targetSdk 32
-        versionCode 3
-        versionName '0.1.2-auth-safety'
+        versionCode 4
+        versionName '0.1.3-auth-diagnostics'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

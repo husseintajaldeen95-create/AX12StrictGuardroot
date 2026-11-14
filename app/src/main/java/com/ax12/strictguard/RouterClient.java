@@ -176,13 +176,15 @@ public final class RouterClient {
 
     /** SG/CE-RED login: SHA-256 + AES-CBC + RSA-OAEP login signature. */
     private void loginEnhanced(String userPassword) throws Exception {
-        JSONObject passwordKeysResponse = requestPlain("login?form=keys", form("operation", "read"), true, true);
+        // Match the documented SG client: keys/auth use an operation=read QUERY,
+        // with an empty POST body. Do not try a second login variant on failure.
+        JSONObject passwordKeysResponse = requestPlain("login?form=keys&operation=read", formEmpty(), true, true);
         JSONObject passwordKeyData = requiredData(passwordKeysResponse);
         JSONArray passwordKey = passwordKeyData.optJSONArray("password");
         if (passwordKey == null || passwordKey.length() < 2)
             throw new IllegalStateException("بروتوكول SG: لم تصل مفاتيح تشفير كلمة المرور");
 
-        JSONObject authResponse = requestPlain("login?form=auth", form("operation", "read"), true, true);
+        JSONObject authResponse = requestPlain("login?form=auth&operation=read", formEmpty(), true, true);
         JSONObject authData = requiredData(authResponse);
         JSONArray authKey = authData.optJSONArray("key");
         if (authKey == null || authKey.length() < 2)
@@ -380,8 +382,12 @@ public final class RouterClient {
                 if (location != null && !location.isEmpty()) message += " (الراوتر طلب إعادة توجيه)";
                 if (responseText.toLowerCase(Locale.ROOT).contains("exceeded max attempts"))
                     message += " (exceeded max attempts)";
+                String retryHeader = connection.getHeaderField("Retry-After");
+                long serverSeconds = AuthAttemptPolicy.parseServerRetrySeconds(retryHeader);
+                if (serverSeconds >= 0) message += " [router-retry-seconds:" + serverSeconds + "]";
+                else message += "؛ الراوتر لم يرسل مدة Retry-After رقمية قابلة للاستخدام";
                 if (status == HttpURLConnection.HTTP_FORBIDDEN)
-                    message += "؛ رفض الراوتر الطلب. تحقق من نمط المصادقة وجلسة الإدارة وإعداد HTTP/HTTPS";
+                    message += "؛ قد تكون المصادقة أو التوقيع غير متوافقين، وليس بالضرورة حظراً لمدة محددة";
                 throw new IllegalStateException(message);
             }
             return responseText;

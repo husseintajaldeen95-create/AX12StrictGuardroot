@@ -22,6 +22,23 @@ public final class AuthAttemptPolicy {
         return isDenied(message) ? DENIED_COOLDOWN_MS : OTHER_FAILURE_COOLDOWN_MS;
     }
 
+    /** A Retry-After header is useful only if the router actually supplies it. */
+    public static long parseServerRetrySeconds(String value) {
+        if (value == null || !value.matches("[0-9]{1,8}")) return -1L;
+        try {
+            long seconds = Long.parseLong(value);
+            return seconds <= 86400L ? seconds : -1L;
+        } catch (NumberFormatException ex) { return -1L; }
+    }
+
+    public static long serverRetrySecondsFromError(String message) {
+        if (message == null) return -1L;
+        java.util.regex.Matcher match = java.util.regex.Pattern.compile(
+                "\\[router-retry-seconds:([0-9]{1,8})\\]").matcher(message);
+        if (!match.find()) return -1L;
+        return parseServerRetrySeconds(match.group(1));
+    }
+
     public static long remainingMs(long nowEpochMs, long retryAfterEpochMs) {
         return Math.max(0L, retryAfterEpochMs - nowEpochMs);
     }
