@@ -19,7 +19,10 @@ public final class GuardService extends Service {
     public static final String EXTRA_HOST="host";
     public static final String EXTRA_PASS="password";
     private static final String CHANNEL="strict_guard_v1";
+    private static final int MAX_REMOVALS_PER_CYCLE = 1; // fail-safe: never bulk-delete on one poll
     private volatile boolean active=false;
+    private static volatile boolean running=false;
+    public static boolean isRunning(){return running;}
     private Thread worker;
     private GuardLog log;
     private NotificationManager notifier;
@@ -43,12 +46,15 @@ public final class GuardService extends Service {
         if(STOP.equals(intent.getAction())) {halt();stopSelf();return START_NOT_STICKY;}
         if(!START.equals(intent.getAction()))return START_NOT_STICKY;
         if(active) {log.add("الحارس يعمل بالفعل؛ تجاهل التشغيل المكرر");return START_NOT_STICKY;}
+        // Enter foreground immediately; invalid start data must not trigger the Android
+        // foreground-service startup timeout.
+        startForeground(42,notifyText("جارٍ التحقق من إعدادات بدء المراقبة"));
         String host=intent.getStringExtra(EXTRA_HOST);
         String pass=intent.getStringExtra(EXTRA_PASS);
-        if(host==null || pass==null || pass.isEmpty()) {log.add("تعذر تشغيل الحارس: البيانات ناقصة");stopSelf();return START_NOT_STICKY;}
+        if(host==null || pass==null || pass.isEmpty()) {log.add("تعذر تشغيل الحارس: البيانات ناقصة");stopForeground(true);stopSelf();return START_NOT_STICKY;}
         try {new RouterClient(host);if(new TrustedStore(this).get().isEmpty())throw new IllegalStateException("القائمة اليدوية فارغة");}
-        catch(Exception e){log.add("تعذر البدء: "+e.getMessage());stopSelf();return START_NOT_STICKY;}
-        active=true;startForeground(42,notifyText("مراقبة القائمة البيضاء قيد التشغيل"));
+        catch(Exception e){log.add("تعذر البدء: "+e.getMessage());stopForeground(true);stopSelf();return START_NOT_STICKY;}
+        active=true;running=true;startForeground(42,notifyText("مراقبة القائمة البيضاء قيد التشغيل"));
         worker=new Thread(()->monitor(host,pass),"AX12-StrictGuard");worker.start();
         return START_NOT_STICKY; // if killed, do not restart without an explicitly supplied password
     }
@@ -58,7 +64,7 @@ public final class GuardService extends Service {
         try {
             client=new RouterClient(host);
             client.login(pass);
-            log.add("اتصال إدارة ناجح. بدء التحقق من القائمة البيضاء.");
+            log.add("اتصال إدارة ناجح عبر "+client.getProtocolName()+". بدء التحقق من القائمة البيضاء.");
             while(active && !Thread.currentThread().isInterrupted()) {
                 try {
                     RouterClient.Settings settings=client.readSettings();
@@ -73,25 +79,31 @@ public final class GuardService extends Service {
                     Set<String> trusted=new TrustedStore(this).get();
                     if(trusted.isEmpty()) {log.add("القائمة اليدوية فارغة، توقفت المراقبة");break;}
                     String protectedHost=settings.protectedHost;
+                    final String normalizedHost;
                     try {
-                        String normalized=MacPolicy.normalize(protectedHost);
-                        if(!trusted.contains(normalized)) {
-                            log.add("إنذار: عنوان جهاز الإدارة المحمي "+normalized+" غير موجود في قائمة الثقة. أضفه يدوياً قبل البدء.");
-                            update("أضف MAC جهاز الإدارة إلى القائمة المعتمدة");break;
-                        }
-                    } catch(IllegalArgumentException ignored) {log.add("تنبيه: الراوتر لم يعلن عنوان جهاز الإدارة بصيغة مفهومة");}
+                        normalizedHost=MacPolicy.normalize(protectedHost);
+                    } catch(IllegalArgumentException invalidHost) {
+                        // A missing/unparseable protected host makes it unsafe to decide
+                        // which entries may be removed. Stop instead of guessing.
+                        log.add("إنذار: لم يعلن الراوتر MAC جهاز الإدارة بصيغة صحيحة؛ أوقفت الحارس دون حذف أي عنوان");
+                        update("تعذر تحديد جهاز الإدارة؛ لم يُحذف أي MAC");break;
+                    }
+                    if(!trusted.contains(normalizedHost)) {
+                        log.add("إنذار: عنوان جهاز الإدارة المحمي "+normalizedHost+" غير موجود في قائمة الثقة. أضفه يدوياً قبل البدء.");
+                        update("أضف MAC جهاز الإدارة إلى القائمة المعتمدة");break;
+                    }
                     Set<String> actual=client.readAllowed();
                     List<String> unauthorized=MacPolicy.unauthorized(actual,trusted,protectedHost);
                     if(unauthorized.size()>0) {
                         log.add("اكتُشف "+unauthorized.size()+" MAC غير مصرح به في Allow List");
                         int removed=0;
                         for(String m:unauthorized) {
-                            if(!active || removed>=8) break;
+                            if(!active || removed>=MAX_REMOVALS_PER_CYCLE) break;
                             client.removeAllowed(m);
                             log.add("أزيل من القائمة البيضاء: "+m);
                             removed++;
                         }
-                        update("أُزيل "+removed+" عنوان غير معتمد من Allow List");
+                        update("أُزيل "+removed+" عنوان غير معتمد من Allow List؛ الحد عنوان واحد في كل دورة");
                         lastResult="";
                     } else if(!"healthy".equals(lastResult)) {
                         log.add("مراجعة ناجحة: القائمة البيضاء لا تحتوي على MAC غير معتمد");
@@ -111,7 +123,7 @@ public final class GuardService extends Service {
         } catch (Exception e) {
             log.add("فشل الاتصال أو تسجيل الدخول: "+e.getMessage());
         } finally {
-            if(client!=null)client.close();active=false;
+            if(client!=null)client.close();active=false;running=false;
             log.add("المراقبة متوقفة؛ الراوتر يدير الشبكة حسب إعداداته الحالية");
             stopForeground(true);stopSelf();
         }

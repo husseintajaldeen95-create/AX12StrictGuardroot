@@ -6,9 +6,8 @@ AX12 Strict Guard — تعليمات البناء السحابي
 
 2) احتفظ بمجلد .github/workflows كما هو.
    يستخدم workflow إصدار android-actions/setup-android@v4.
-   لا تستخدم android-actions/setup-android@v3 في هذا المشروع؛
-   سجل البناء المرسل أظهر أنه حاول تثبيت حزمة SDK القديمة "tools"
-   التي لم تعد Google توفرها.
+   لا تستبدله بـ android-actions/setup-android@v3؛ سجل البناء السابق
+   أظهر أن الإصدار v3 حاول تثبيت حزمة SDK القديمة "tools" غير المتاحة.
 
 3) بعد رفع الملفات، افتح GitHub ثم Actions ثم Build Android APK
    وشغّل workflow أو ادفع commit جديداً.
@@ -20,6 +19,7 @@ AX12 Strict Guard — تعليمات البناء السحابي
    gradle --no-daemon :app:assembleDebug
 
 ملاحظة:
-هذا التعديل يعالج بنية المشروع وإعداد البناء فقط. نجاح تجميع APK
-لا يثبت توافق واجهة LuCI مع إصدار Firmware الموجود على الراوتر.
-يجب اختبار الاتصال بوضع القراءة فقط قبل تشغيل الحارس.
+تحتوي هذه النسخة أيضاً على تصحيح مسار تسجيل الدخول إلى LuCI، والاحتفاظ
+بـ Cookies، ورسائل تشخيص HTTP 403، واختبارات تمنع تكرار /login/login.
+نجاح تجميع APK لا يثبت توافق واجهة LuCI مع Firmware الراوتر.
+اختبر الاتصال والقراءة فقط أولاً؛ إذا ظهر HTTP 403 فلا تشغّل الحارس.

@@ -20,6 +20,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.Set;
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
 
 /** Arabic UI. Manual MAC approvals are independent of whatever the router auto-adds. */
 public final class MainActivity extends Activity {
@@ -28,6 +30,9 @@ public final class MainActivity extends Activity {
     private TextView trustedView,eventsView,statusView;
     private TrustedStore store;
     private GuardLog log;
+    private boolean routerReadTestPassed=false;
+    private String testedHost;
+    private String testedPasswordFingerprint;
     private final Runnable refresh=new Runnable(){@Override public void run(){
         if(trustedView!=null) updateLists();ui.postDelayed(this,3500);
     }};
@@ -50,7 +55,7 @@ public final class MainActivity extends Activity {
         TextView title=text("AX12 STRICT GUARD",24,true); title.setTextColor(Color.rgb(18,94,122)); col.addView(title);
         col.addView(text("الحارس المستقل للقائمة البيضاء – إصدار تجريبي للاختبار",14,false));
         col.addView(text("لا يُضاف أي MAC تلقائياً إلى قائمة الثقة. عند تشغيل الحارس تُراجع قائمة الراوتر كل 15 ثانية وتُزال الإدخالات غير المعتمدة.",14,false));
-        col.addView(text("مهم: لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص؛ ولا يمكن كشف انتحال MAC معتمد.",13,true));
+        col.addView(text("مهم: لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص؛ ولا يمكن كشف انتحال MAC معتمد. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
         col.addView(text("عنوان الراوتر المحلي",16,true));
         hostField=field("192.168.0.1",InputType.TYPE_CLASS_PHONE);hostField.setText(store.getHost());col.addView(hostField);
         col.addView(text("كلمة مرور إدارة الراوتر (لن تُحفظ)",16,true));
@@ -94,36 +99,73 @@ public final class MainActivity extends Activity {
     private void requirePassword(){if(passwordField.getText().length()==0)throw new IllegalArgumentException("أدخل كلمة مرور إدارة الراوتر");}
     private void error(String s){new AlertDialog.Builder(this).setTitle("تنبيه").setMessage(s).setPositiveButton("موافق",null).show();}
     private void testConnection(){
-        try{requirePassword();String host=routerHost(),pwd=passwordField.getText().toString();
-            statusView.setText("جاري اختبار الاتصال...");
+        try{
+            if(GuardService.isRunning())throw new IllegalStateException("أوقف المراقبة أولاً قبل إجراء اختبار اتصال جديد حتى لا تتعارض جلستا الإدارة");
+            requirePassword();String host=routerHost(),pwd=passwordField.getText().toString();
+            routerReadTestPassed=false;testedHost=null;testedPasswordFingerprint=null;
+            statusView.setText("جاري اختبار الاتصال والقراءة فقط...");
             new Thread(()->{
-                try{RouterClient client=new RouterClient(host);client.login(pwd);
-                    RouterClient.Settings s=client.readSettings();Set<String> allow=client.readAllowed();client.close();
-                    ui.post(()->{statusView.setText("متصل: enabled="+s.enabled+" / mode="+s.mode+" / Allow List="+allow.size());
-                        log.add("نجح اختبار قراءة القائمة البيضاء: "+allow.size()+" عنوان");updateLists();});
-                }catch(Exception e){ui.post(()->{statusView.setText("فشل اختبار التوافق/الاتصال");log.add("فشل اختبار الاتصال: "+e.getMessage());updateLists();});}
+                RouterClient client=null;
+                try{
+                    client=new RouterClient(host);
+                    client.login(pwd);
+                    String protocol=client.getProtocolName();
+                    RouterClient.Settings s=client.readSettings();
+                    Set<String> allow=client.readAllowed();
+                    String fingerprint=passwordFingerprint(pwd);
+                    ui.post(()->{routerReadTestPassed=true;testedHost=host;testedPasswordFingerprint=fingerprint;
+                        statusView.setText("متصل عبر "+protocol+" / enabled="+s.enabled+" / mode="+s.mode+" / Allow List="+allow.size());
+                        log.add("نجح اختبار القراءة عبر "+protocol+"؛ القائمة البيضاء: "+allow.size()+" عنوان");updateLists();});
+                }catch(Exception e){
+                    String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
+                    ui.post(()->{routerReadTestPassed=false;testedHost=null;testedPasswordFingerprint=null;
+                        statusView.setText("فشل اختبار التوافق/الاتصال؛ راجع سجل الأحداث");log.add("فشل اختبار الاتصال: "+message);updateLists();});
+                }finally{if(client!=null)client.close();}
             },"AX12-ReadTest").start();
         }catch(Exception e){error(e.getMessage());}
     }
     private void confirmAllow(){
-        try {requirePassword();String mac=selectedMac();
+        try {
+            if(GuardService.isRunning())throw new IllegalStateException("أوقف المراقبة أولاً قبل إرسال MAC إلى الراوتر");
+            requirePassword();String mac=selectedMac();
             if(!store.get().contains(mac))throw new IllegalArgumentException("اعتمد MAC محلياً قبل إرساله");
             String host=routerHost(),pass=passwordField.getText().toString();
+            requireSuccessfulReadTest(host,pass);
             new AlertDialog.Builder(this).setTitle("موافقة صريحة لإضافة MAC")
               .setMessage("إضافة "+mac+" إلى القائمة البيضاء للراوتر؟ هذا إجراء إضافي اختياري.")
               .setPositiveButton("أضف الآن",(d,w)->new Thread(()->{
-                  try{RouterClient client=new RouterClient(host);client.login(pass);client.allowObserved(mac);client.close();
-                      ui.post(()->{log.add("أُرسل MAC المعتمد إلى الراوتر: "+mac);updateLists();});}
-                  catch(Exception e){ui.post(()->error("تعذر إضافة MAC إلى الراوتر: "+e.getMessage()));}
+                  RouterClient client=null;
+                  try{
+                      client=new RouterClient(host);client.login(pass);client.allowObserved(mac);
+                      ui.post(()->{log.add("أُرسل MAC المعتمد إلى الراوتر: "+mac);updateLists();});
+                  }catch(Exception e){
+                      String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
+                      ui.post(()->error("تعذر إضافة MAC إلى الراوتر: "+message));
+                  }finally{if(client!=null)client.close();}
               },"AX12-Approve").start())
               .setNegativeButton("إلغاء",null).show();
         }catch(Exception e){error(e.getMessage());}
     }
+    private void requireSuccessfulReadTest(String host,String password){
+        if(!routerReadTestPassed || !host.equals(testedHost) || !passwordFingerprint(password).equals(testedPasswordFingerprint))
+            throw new IllegalStateException("يجب نجاح اختبار الاتصال والقراءة فقط بنفس عنوان الراوتر وكلمة المرور قبل أي تعديل أو تشغيل للمراقبة");
+    }
+    private static String passwordFingerprint(String value){
+        try{
+            byte[] digest=MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out=new StringBuilder(digest.length*2);
+            for(byte b:digest)out.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
+            return out.toString();
+        }catch(Exception e){throw new IllegalStateException("تعذر التحقق من جلسة الاختبار",e);}
+    }
     private void startGuard(){
-        try {requirePassword();String host=routerHost();if(store.get().isEmpty())throw new IllegalStateException("أدخل عنوان MAC معتمداً واحداً على الأقل بما فيه جهاز الإدارة");
+        try {
+            if(GuardService.isRunning())throw new IllegalStateException("المراقبة تعمل بالفعل");
+            requirePassword();String host=routerHost();if(store.get().isEmpty())throw new IllegalStateException("أدخل عنوان MAC معتمداً واحداً على الأقل بما فيه جهاز الإدارة");
             String password=passwordField.getText().toString();
+            requireSuccessfulReadTest(host,password);
             new AlertDialog.Builder(this).setTitle("تشغيل الحارس")
-              .setMessage("يتطلب تفعيل Allow List مسبقاً في الراوتر. سيحذف الحارس أي عنوان غير معتمد يكتشفه؛ وقد ينقطع اتصال الأجهزة غير المدرجة. تأكد أن MAC جهاز الإدارة ضمن قائمتك.")
+              .setMessage("يتطلب نجاح اختبار الاتصال والقراءة أولاً، وتفعيل Allow List مسبقاً في الراوتر. سيحذف الحارس عنواناً واحداً غير معتمد في كل دورة، وقد ينقطع اتصال الأجهزة غير المدرجة. تأكد أن MAC جهاز الإدارة ضمن قائمتك. إذا ظهر HTTP 403 فلا تشغّل الحارس.")
               .setPositiveButton("تشغيل",(d,w)->{
                   Intent i=new Intent(this,GuardService.class);i.setAction(GuardService.START);
                   i.putExtra(GuardService.EXTRA_HOST,host);i.putExtra(GuardService.EXTRA_PASS,password);
