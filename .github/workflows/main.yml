@@ -44,7 +44,7 @@ jobs:
           test -f .github/workflows/main.yml
           test -f tests/run_mac_tests.sh
 
-      - name: Run MAC policy tests
+      - name: Run pure Java policy and URL tests
         run: sh tests/run_mac_tests.sh
 
       - name: Build debug APK
