@@ -31,6 +31,7 @@ public final class MainActivity extends Activity {
     private TrustedStore store;
     private GuardLog log;
     private boolean routerReadTestPassed=false;
+    private boolean testingConnection=false;
     private String testedHost;
     private String testedPasswordFingerprint;
     private final Runnable refresh=new Runnable(){@Override public void run(){
@@ -60,6 +61,7 @@ public final class MainActivity extends Activity {
         hostField=field("192.168.0.1",InputType.TYPE_CLASS_PHONE);hostField.setText(store.getHost());col.addView(hostField);
         col.addView(text("كلمة مرور إدارة الراوتر (لن تُحفظ)",16,true));
         passwordField=field("كلمة مرور الإدارة",InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD); col.addView(passwordField);
+        col.addView(button("فحص بروتوكول الراوتر دون تسجيل الدخول",this::probeCompatibility));
         col.addView(button("1. اختبار الاتصال (قراءة فقط)",this::testConnection));
         col.addView(text("أضف عناوين MAC المعتمدة يدوياً",16,true));
         macField=field("AA:BB:CC:DD:EE:FF",InputType.TYPE_CLASS_TEXT);col.addView(macField);
@@ -98,16 +100,35 @@ public final class MainActivity extends Activity {
     private String routerHost(){String ip=hostField.getText().toString().trim();new RouterClient(ip);store.setHost(ip);return ip;}
     private void requirePassword(){if(passwordField.getText().length()==0)throw new IllegalArgumentException("أدخل كلمة مرور إدارة الراوتر");}
     private void error(String s){new AlertDialog.Builder(this).setTitle("تنبيه").setMessage(s).setPositiveButton("موافق",null).show();}
+    private void probeCompatibility() {
+        try {
+            if (GuardService.isRunning() || testingConnection)
+                throw new IllegalStateException("أوقف المراقبة أو اختبار الدخول أولاً");
+            String host=routerHost();
+            statusView.setText("جارٍ فحص التهيئة دون إرسال كلمة مرور...");
+            new Thread(() -> {
+                try {
+                    String result=new RouterClient(host).probeCompatibility();
+                    ui.post(() -> {statusView.setText(result);log.add("تشخيص بلا كلمة مرور: " + result);updateLists();});
+                } catch(Exception e) {
+                    String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
+                    ui.post(() -> {statusView.setText("فشل فحص البروتوكول دون تسجيل دخول");log.add("تشخيص بلا كلمة مرور: " + message);updateLists();});
+                }
+            },"AX12-NoLoginProbe").start();
+        } catch(Exception e) {error(e.getMessage());}
+    }
     private void testConnection(){
         try{
+            if (testingConnection) throw new IllegalStateException("اختبار الدخول جارٍ بالفعل؛ لا تكرر الضغط");
             if(GuardService.isRunning())throw new IllegalStateException("أوقف المراقبة أولاً قبل إجراء اختبار اتصال جديد حتى لا تتعارض جلستا الإدارة");
             requirePassword();String host=routerHost(),pwd=passwordField.getText().toString();
             routerReadTestPassed=false;testedHost=null;testedPasswordFingerprint=null;
             statusView.setText("جاري اختبار الاتصال والقراءة فقط...");
+            testingConnection=true;
             new Thread(()->{
                 RouterClient client=null;
                 try{
-                    client=new RouterClient(host);
+                    client=new RouterClient(this,host);
                     client.login(pwd);
                     String protocol=client.getProtocolName();
                     RouterClient.Settings s=client.readSettings();
@@ -120,7 +141,10 @@ public final class MainActivity extends Activity {
                     String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
                     ui.post(()->{routerReadTestPassed=false;testedHost=null;testedPasswordFingerprint=null;
                         statusView.setText("فشل اختبار التوافق/الاتصال؛ راجع سجل الأحداث");log.add("فشل اختبار الاتصال: "+message);updateLists();});
-                }finally{if(client!=null)client.close();}
+                }finally{
+                    if(client!=null)client.close();
+                    ui.post(()->testingConnection=false);
+                }
             },"AX12-ReadTest").start();
         }catch(Exception e){error(e.getMessage());}
     }
@@ -136,7 +160,7 @@ public final class MainActivity extends Activity {
               .setPositiveButton("أضف الآن",(d,w)->new Thread(()->{
                   RouterClient client=null;
                   try{
-                      client=new RouterClient(host);client.login(pass);client.allowObserved(mac);
+                      client=new RouterClient(this,host);client.login(pass);client.allowObserved(mac);
                       ui.post(()->{log.add("أُرسل MAC المعتمد إلى الراوتر: "+mac);updateLists();});
                   }catch(Exception e){
                       String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();

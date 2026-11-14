@@ -1,5 +1,6 @@
 package com.ax12.strictguard;
 
+import android.content.Context;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -39,6 +40,8 @@ import javax.crypto.spec.SecretKeySpec;
  */
 public final class RouterClient {
     private final String host;
+    private final Context appContext;
+    private boolean ownsLoginGate;
     private String token;
     private String password; // in-memory only; cleared by close()
     private final Map<String, String> cookies = new LinkedHashMap<>();
@@ -58,6 +61,11 @@ public final class RouterClient {
     private static final int RSA_OAEP_LEGACY_CHUNK_SIZE = 53;
 
     public RouterClient(String ip) {
+        this(null, ip);
+    }
+
+    public RouterClient(Context context, String ip) {
+        this.appContext = context == null ? null : context.getApplicationContext();
         if (ip == null || !ip.matches("(?:\\d{1,3}\\.){3}\\d{1,3}"))
             throw new IllegalArgumentException("أدخل عنوان IPv4 للراوتر");
         try {
@@ -74,53 +82,79 @@ public final class RouterClient {
         this.host = ip;
     }
 
-    /** Detect firmware encryption profile, then run the matching login handshake. */
+    /**
+     * Exactly one login attempt per call. Shared lock prevents concurrent app/service logins;
+     * denied attempts create a persisted cooldown. Authentication profile compatibility
+     * must still be verified on the actual router firmware.
+     */
     public void login(String userPassword) throws Exception {
         if (userPassword == null || userPassword.isEmpty())
             throw new IllegalArgumentException("كلمة مرور الإدارة مطلوبة");
-
+        if (appContext == null)
+            throw new IllegalStateException("يجب إنشاء عميل الراوتر باستخدام سياق Android قبل تسجيل الدخول");
+        if (ownsLoginGate)
+            throw new IllegalStateException("هناك جلسة إدارة مفتوحة مسبقاً؛ أغلقها أولاً");
+        AuthAttemptGate.begin(appContext);
+        ownsLoginGate = true;
         clearSession();
         this.password = userPassword;
         try {
             this.enhancedMode = detectEnhancedProfile();
-            if (enhancedMode) {
-                loginEnhanced(userPassword);
-            } else {
-                loginLegacy(userPassword);
-            }
+            if (enhancedMode) loginEnhanced(userPassword);
+            else loginLegacy(userPassword);
             if (token == null || !token.matches("[A-Za-z0-9_-]{8,128}"))
                 throw new IllegalStateException("رمز جلسة الراوتر غير متوقع");
+            AuthAttemptGate.succeeded(appContext);
         } catch (Exception e) {
+            AuthAttemptGate.failed(appContext, e);
+            ownsLoginGate = false;
             clearSession();
             throw e;
         }
+    }
+
+    /** Read-only probe, does NOT submit a password or create an administrator session. */
+    public String probeCompatibility() throws Exception {
+        String raw = postRaw("device_config?form=config", encodeForm(form("operation", "read")), true, false);
+        JSONObject root;
+        try { root = new JSONObject(raw); }
+        catch (JSONException e) { throw new IllegalStateException("ردّ الفحص ليس JSON؛ لا يمكن تأكيد نوع المصادقة دون فحص أدق", e); }
+        JSONObject data = root.optJSONObject("data");
+        JSONArray cert = data == null ? null : data.optJSONArray("certification");
+        if (cert == null)
+            return "استجاب الراوتر، لكنه لم يعلن شهادة بروتوكول المصادقة. لا يمكن اعتبار وضع RSA التقليدي مؤكداً.";
+        for (int i = 0; i < cert.length(); i++) {
+            String item = cert.optString(i, "").trim().toUpperCase(Locale.ROOT);
+            if ("EU CE RED".equals(item) || "SG CLS L1 STAGE2".equals(item))
+                return "أعلن الراوتر شهادة SG/CE RED؛ ما زال التوافق الفعلي للتوقيع بحاجة إلى تحقق.";
+        }
+        return "استجاب الراوتر، ولم يعلن SG/CE RED ضمن الشهادات المعروفة؛ لم يثبت بذلك نوع المصادقة.";
     }
 
     public String getProtocolName() {
         return enhancedMode ? "SG/CE RED (SHA-256 + AES-CBC + RSA-OAEP/HMAC)" : "LuCI التقليدي (RSA-PKCS1)";
     }
 
-    /** Read-only pre-login check. It does not change router configuration. */
+    /** Avoid guessing a login protocol when the router has not confirmed its profile. */
     private boolean detectEnhancedProfile() throws Exception {
-        try {
-            String raw = postRaw("device_config?form=config", encodeForm(form("operation", "read")), true, false);
-            JSONObject config = new JSONObject(raw);
-            JSONObject data = config.optJSONObject("data");
-            if (data == null) return false;
-            JSONArray certification = data.optJSONArray("certification");
-            if (certification == null) return false;
-            for (int i = 0; i < certification.length(); i++) {
-                String item = certification.getString(i).trim().toUpperCase(Locale.ROOT);
-                if ("EU CE RED".equals(item) || "SG CLS L1 STAGE2".equals(item)) return true;
-            }
-        } catch (IllegalStateException e) {
-            String message = e.getMessage() == null ? "" : e.getMessage();
-            if (message.contains("HTTP 403")) throw e;
-            // Older firmware may not expose the certification form. Fall back to legacy only
-            // when the endpoint is absent or its response is not a usable certification record.
-        } catch (Exception ignored) {
-            // Older firmware may not expose the certification form. Fall back to legacy.
+        String raw = postRaw("device_config?form=config", encodeForm(form("operation", "read")), true, false);
+        JSONObject config;
+        try { config = new JSONObject(raw); }
+        catch (JSONException e) {
+            throw new IllegalStateException("لا يمكن تحديد بروتوكول المصادقة: استجابة التهيئة ليست JSON. لم تُرسل كلمة المرور.", e);
         }
+        JSONObject data = config.optJSONObject("data");
+        if (data == null)
+            throw new IllegalStateException("لا يمكن تحديد بروتوكول المصادقة من رد التهيئة. لم تُرسل كلمة المرور.");
+        JSONArray certification = data.optJSONArray("certification");
+        if (certification == null)
+            throw new IllegalStateException("لا توجد معلومات شهادة كافية لاختيار بروتوكول الدخول. لم تُرسل كلمة المرور.");
+        for (int i = 0; i < certification.length(); i++) {
+            String item = certification.optString(i, "").trim().toUpperCase(Locale.ROOT);
+            if ("EU CE RED".equals(item) || "SG CLS L1 STAGE2".equals(item)) return true;
+        }
+        // The existing project implements RSA-PKCS1 as its legacy profile. This is
+        // a single choice based on the disclosed flags, not a fallback after a 403.
         return false;
     }
 
@@ -342,10 +376,10 @@ public final class RouterClient {
             String responseText = readResponse(connection, status);
             if (status != HttpURLConnection.HTTP_OK) {
                 String location = connection.getHeaderField("Location");
-                String detail = compact(responseText, 220);
                 String message = "HTTP " + status + " من الراوتر أثناء " + path;
-                if (location != null && !location.isEmpty()) message += " (تحويل إلى: " + compact(location, 120) + ")";
-                if (!detail.isEmpty()) message += "؛ تفاصيل الرد: " + detail;
+                if (location != null && !location.isEmpty()) message += " (الراوتر طلب إعادة توجيه)";
+                if (responseText.toLowerCase(Locale.ROOT).contains("exceeded max attempts"))
+                    message += " (exceeded max attempts)";
                 if (status == HttpURLConnection.HTTP_FORBIDDEN)
                     message += "؛ رفض الراوتر الطلب. تحقق من نمط المصادقة وجلسة الإدارة وإعداد HTTP/HTTPS";
                 throw new IllegalStateException(message);
@@ -406,7 +440,9 @@ public final class RouterClient {
         Object success = response.opt("success");
         if (Boolean.TRUE.equals(success) || (success instanceof Number && ((Number) success).intValue() == 1)) return;
         String error = firstNonEmpty(response, "errorcode", "errorCode", "error_code", "error");
-        throw new IllegalStateException("رفض الراوتر الطلب أثناء " + path + " (" + error + ")؛ تحقق من توافق Firmware والجلسة");
+        String detail = error.toLowerCase(Locale.ROOT).contains("exceeded max attempts")
+                ? "exceeded max attempts" : "رفض المصادقة/الطلب";
+        throw new IllegalStateException("رفض الراوتر الطلب أثناء " + path + " (" + detail + ")؛ لا تكرر المحاولة قبل تشخيص التوافق");
     }
 
     private static String firstNonEmpty(JSONObject object, String... keys) {
@@ -429,14 +465,11 @@ public final class RouterClient {
         try {
             if (enhancedMode) return requestEnhanced(PATH + "?form=" + formName, fields);
             return requestPlain(PATH + "?form=" + formName, fields, false, false);
-        } catch (IllegalStateException e) {
-            // Do not retry raw HTTP 403. It may indicate a rejected route or auth profile;
-            // a blind login can invalidate the browser's only administrator session.
-            String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
-            if (password == null || !(message.contains("timeout") || message.contains("permission denied"))) throw e;
-            login(password);
-            if (enhancedMode) return requestEnhanced(PATH + "?form=" + formName, fields);
-            return requestPlain(PATH + "?form=" + formName, fields, false, false);
+        } catch (Exception e) {
+            // Never auto-login again after a failed read/write. The router can count
+            // each attempt and lock out this client even while browser login works.
+            AuthAttemptGate.markDenied(appContext, e);
+            throw e;
         }
     }
 
@@ -566,5 +599,9 @@ public final class RouterClient {
             }
         }
         clearSession();
+        if (ownsLoginGate) {
+            ownsLoginGate = false;
+            AuthAttemptGate.release(appContext);
+        }
     }
 }

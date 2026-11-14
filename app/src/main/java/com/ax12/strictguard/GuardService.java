@@ -62,7 +62,7 @@ public final class GuardService extends Service {
         RouterClient client=null;
         String lastResult="";
         try {
-            client=new RouterClient(host);
+            client=new RouterClient(this,host);
             client.login(pass);
             log.add("اتصال إدارة ناجح عبر "+client.getProtocolName()+". بدء التحقق من القائمة البيضاء.");
             while(active && !Thread.currentThread().isInterrupted()) {
@@ -116,6 +116,10 @@ public final class GuardService extends Service {
                     String msg=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
                     log.add("تعذر فحص الحماية: "+msg);
                     update("تعذر التحقق من الراوتر: راجع سجل الأحداث");
+                    if(AuthAttemptPolicy.isDenied(msg)) {
+                        log.add("رفض الراوتر جلسة الإدارة. أوقفت المراقبة فوراً دون أي إعادة دخول تلقائية.");
+                        break;
+                    }
                     if(consecutiveFailures>=5) {log.add("إيقاف المراقبة بعد 5 أخطاء متتالية لتجنب الإضرار بالراوتر");break;}
                     pause(Math.min(120000,15000L*consecutiveFailures));
                 }
