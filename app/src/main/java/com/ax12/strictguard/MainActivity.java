@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
         ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setPadding(20,20,20,25);col.setOrientation(LinearLayout.VERTICAL);
         col.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);scroll.addView(col);
         TextView title=text("AX12 STRICT GUARD",24,true); title.setTextColor(Color.rgb(18,94,122)); col.addView(title);
-        col.addView(text("الحارس المستقل للقائمة البيضاء – 0.1.4 safety / تجريبي",14,false));
+        col.addView(text("الحارس المستقل للقائمة البيضاء – 0.1.5 auth diagnosis / تجريبي",14,false));
         col.addView(text("لا يُضاف أي MAC تلقائياً إلى قائمة الثقة. عند تشغيل الحارس تُراجع قائمة الراوتر كل 15 ثانية وتُزال الإدخالات غير المعتمدة.",14,false));
         col.addView(text("مهم: لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص؛ ولا يمكن كشف انتحال MAC معتمد. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
         col.addView(text("عنوان الراوتر المحلي",16,true));

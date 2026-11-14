@@ -218,7 +218,7 @@ public final class RouterClient {
         JSONObject wrapper = new JSONObject(rawResponse);
         String encryptedResponse = wrapper.getString("data");
         JSONObject decoded = new JSONObject(aesDecrypt(encryptedResponse));
-        requireSuccess(decoded, "login?form=login");
+        requireSuccess(decoded, "login?form=login [SG: رد مفكوك التشفير]");
         this.token = requiredData(decoded).getString("stok");
     }
 
@@ -456,22 +456,32 @@ public final class RouterClient {
         if (Boolean.TRUE.equals(success) || (success instanceof Number && ((Number) success).intValue() == 1)) return;
         // Some firmwares put errorcode under data, others at response root.
         // Do not print raw router responses because they may contain session secrets.
-        String error = firstNonEmpty(response, "errorcode", "errorCode", "error_code", "error", "msg");
-        JSONObject details = response.optJSONObject("data");
-        if ("unknown".equals(error) && details != null)
-            error = firstNonEmpty(details, "errorcode", "errorCode", "error_code", "error", "msg");
-        String detail = error.toLowerCase(Locale.ROOT).contains("exceeded max attempts")
-                ? "exceeded max attempts"
-                : (error.matches("[+-]?[0-9]{1,10}") ? "errorcode=" + error : "رفض المصادقة/الطلب");
-        throw new IllegalStateException("رفض الراوتر الطلب أثناء " + path + " (" + detail + ")؛ لا تكرر المحاولة قبل تشخيص التوافق");
-    }
-
-    private static String firstNonEmpty(JSONObject object, String... keys) {
-        for (String key : keys) {
-            String value = object.optString(key, "");
-            if (!value.isEmpty() && !"null".equalsIgnoreCase(value)) return value;
+        // Only expose the exact error field and a short, sanitized code, never the
+        // encrypted/decrypted router response, cookies, stok, keys or passwords.
+        String[] keys = {"errorcode", "errorCode", "error_code", "error", "msg", "message", "code", "reason"};
+        JSONObject nested = response.optJSONObject("data");
+        String errorField = null;
+        String errorValue = null;
+        for (JSONObject source : new JSONObject[]{nested, response}) {
+            if (source == null) continue;
+            for (String key : keys) {
+                Object candidate = source.opt(key);
+                if (candidate instanceof String || candidate instanceof Number) {
+                    String value = String.valueOf(candidate).trim();
+                    if (!value.isEmpty() && !"null".equalsIgnoreCase(value)) {
+                        errorField = key;
+                        errorValue = value;
+                        break;
+                    }
+                }
+            }
+            if (errorField != null) break;
         }
-        return "unknown";
+        String detail = errorField == null
+                ? "لم يرجع الراوتر رمز خطأ معروفاً"
+                : errorField + "=" + AuthErrorLabel.safeValue(errorValue);
+        throw new IllegalStateException("رفض الراوتر الطلب أثناء " + path + " (" + detail
+                + ")؛ لن تجري إعادة محاولة تلقائية. إذا استمر الرفض فلا تكرر تسجيل الدخول.");
     }
 
     private static JSONObject requiredData(JSONObject response) throws JSONException {

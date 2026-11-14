@@ -20,5 +20,11 @@ public final class AuthAttemptPolicyTest {
         ok(AuthAttemptPolicy.serverRetrySecondsFromError("exceeded max attempts") == -1L,
                 "never invent router lockout duration");
         System.out.println("PASS: " + count + " AuthAttemptPolicy tests");
+        if (!AuthAttemptPolicy.isDenied("رفض الراوتر الطلب أثناء login?form=login [SG: رد مفكوك التشفير] (errorcode=11)"))
+            throw new AssertionError("login rejection must trigger local cooldown");
+        if (AuthAttemptPolicy.cooldownMs("رفض الراوتر الطلب أثناء login?form=login (errorcode=11)")
+                != AuthAttemptPolicy.DENIED_COOLDOWN_MS)
+            throw new AssertionError("rejected login incorrectly received short retry delay");
+
     }
 }

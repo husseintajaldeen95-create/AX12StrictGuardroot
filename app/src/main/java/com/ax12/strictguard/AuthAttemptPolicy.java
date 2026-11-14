@@ -12,6 +12,7 @@ public final class AuthAttemptPolicy {
         if (message == null) return false;
         String value = message.toLowerCase(Locale.ROOT);
         return value.contains("exceeded max attempts")
+                || (value.contains("login?form=login") && value.contains("رفض الراوتر الطلب"))
                 || value.contains("http 403")
                 || value.contains("too many attempts")
                 || value.contains("rate limit")
