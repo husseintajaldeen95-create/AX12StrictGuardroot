@@ -491,13 +491,17 @@ public final class RouterClient {
     }
 
     private JSONObject api(String formName, String operation, Map<String, String> data) throws Exception {
+        return apiOnPath(PATH, formName, operation, data);
+    }
+
+    private JSONObject apiOnPath(String route, String formName, String operation, Map<String, String> data) throws Exception {
         if (sessionInvalid)
             throw new IllegalStateException("جلسة الراوتر غير موثوقة بعد فشل سابق؛ أُلغيت كل الطلبات التالية");
         Map<String, String> fields = form("operation", operation);
         fields.putAll(data);
         try {
-            if (enhancedMode) return requestEnhanced(PATH + "?form=" + formName, fields);
-            return requestPlain(PATH + "?form=" + formName, fields, false, false);
+            if (enhancedMode) return requestEnhanced(route + "?form=" + formName, fields);
+            return requestPlain(route + "?form=" + formName, fields, false, false);
         } catch (Exception e) {
             // Any failed authenticated API request invalidates the local session.
             // Never retry it automatically or send a logout using possibly stale crypto state.
@@ -567,6 +571,66 @@ public final class RouterClient {
     private static String rowMac(JSONObject row) {
         String mac = row.optString("mac", row.optString("macaddr", ""));
         return MacPolicy.normalize(mac);
+    }
+
+    /** A read-only router allow-list snapshot including optional device labels. */
+    public Map<String, String> readAllowedWithNames() throws Exception {
+        List<JSONObject> entries = rows(api("white_list", "load", formEmpty()));
+        Map<String, String> allowed = new LinkedHashMap<>();
+        for (JSONObject row : entries) {
+            String mac = rowMac(row);
+            // Not all firmware versions expose a name for allow-list records.
+            String name = row.optString("name", row.optString("hostname", ""));
+            allowed.put(mac, name);
+        }
+        return allowed;
+    }
+
+    /**
+     * Status snapshot from Archer AX12: connected wired and wireless clients.
+     * This endpoint is distinct from the access-control allow list. It is a
+     * snapshot and does not prove a device remains online after the request.
+     * Throws rather than labeling all devices offline on unsupported firmware.
+     */
+    public ConnectedSnapshot readConnectedDevices() throws Exception {
+        JSONObject data = requiredData(apiOnPath("admin/status", "all", "read", formEmpty()));
+        Object wired = data.opt("access_devices_wired");
+        Object wireless = data.opt("access_devices_wireless_host");
+        if (!(wired instanceof JSONArray) && !(wireless instanceof JSONArray))
+            throw new IllegalStateException("لا يعرض Firmware حقول الأجهزة المتصلة المتوقعة؛ لا يمكن تحديد المتصلين");
+        if (wired != null && !(wired instanceof JSONArray)
+                || wireless != null && !(wireless instanceof JSONArray))
+            throw new IllegalStateException("صيغة قائمة الأجهزة المتصلة غير متوقعة؛ أُلغيت المقارنة");
+        List<DeviceInventory.ConnectedDevice> out = new ArrayList<>();
+        readClientArray((JSONArray) wired, "سلكي", out);
+        readClientArray((JSONArray) wireless, "لاسلكي", out);
+        // A missing wired or wireless section is reported as partial rather than
+        // assuming that no clients exist on the omitted transport.
+        return new ConnectedSnapshot(out, wired instanceof JSONArray && wireless instanceof JSONArray);
+    }
+
+    public static final class ConnectedSnapshot {
+        public final List<DeviceInventory.ConnectedDevice> devices;
+        public final boolean completeSections;
+        ConnectedSnapshot(List<DeviceInventory.ConnectedDevice> devices, boolean completeSections) {
+            this.devices = java.util.Collections.unmodifiableList(new ArrayList<>(devices));
+            this.completeSections = completeSections;
+        }
+    }
+
+    private static void readClientArray(JSONArray rows, String fallbackMedium,
+                                        List<DeviceInventory.ConnectedDevice> into) {
+        if (rows == null) return;
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject row = rows.optJSONObject(i);
+            if (row == null) throw new IllegalStateException("صف غير مفهوم ضمن الأجهزة المتصلة");
+            String mac = row.optString("macaddr", "");
+            // An invalid MAC invalidates this snapshot instead of falsely
+            // concluding that the unparseable connected device is unauthorized.
+            String medium = row.optString("wire_type", fallbackMedium);
+            into.add(new DeviceInventory.ConnectedDevice(mac,
+                    row.optString("hostname", ""), row.optString("ipaddr", ""), medium));
+        }
     }
 
     public Set<String> readAllowed() throws Exception {
