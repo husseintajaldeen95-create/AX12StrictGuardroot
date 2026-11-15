@@ -84,8 +84,9 @@ public final class MainActivity extends Activity {
         ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setPadding(20,20,20,25);col.setOrientation(LinearLayout.VERTICAL);
         col.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);scroll.addView(col);
         TextView title=text("AX12 STRICT GUARD",24,true); title.setTextColor(Color.rgb(18,94,122)); col.addView(title);
-        col.addView(text("إدارة قائمة السماح بالتحديد والمزامنة الصريحة – 0.1.9",14,false));
+        col.addView(text("إدارة قائمة السماح ورصد الأجهزة – 0.2.0",14,false));
         col.addView(text("لا يُضاف أي MAC تلقائياً إلى قائمة الثقة. عند تشغيل الحارس تُراجع قائمة الراوتر كل 15 ثانية وتُزال الإدخالات غير المعتمدة.",14,false));
+        col.addView(text("أثناء عمل الحارس، يرصد التطبيق ظهور الأجهزة واختفاءها من قائمة المتصلين ويرسل إشعارات بذلك بعد تأكيد التغيير في قراءتين كاملتين متتاليتين. القراءة الأولى خط أساس ولا تُصدر إشعارات للأجهزة الموجودة مسبقاً. هذه الميزة للقراءة فقط ولا تغيّر إعدادات الراوتر.",13,false));
         col.addView(text("تُرفض عناوين MAC المحلية الإدارة (Private/Randomized) من قائمة الثقة. قبول MAC عالمي الإدارة لا يثبت أنه أصلي ولا يمنع انتحاله. لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
         col.addView(text("عنوان الراوتر المحلي",16,true));
         hostField=field("192.168.0.1",InputType.TYPE_CLASS_PHONE);hostField.setText(store.getHost());col.addView(hostField);
@@ -127,7 +128,7 @@ public final class MainActivity extends Activity {
         col.addView(button("2. تشغيل المراقبة الصارمة",this::startGuard));
         col.addView(button("إيقاف المراقبة",this::stopGuard));
         statusView=text("الحالة: غير متصلة",14,true);col.addView(statusView);
-        col.addView(text("سجل الأحداث",17,true));
+        col.addView(text("سجل أحداث الحماية واتصال الأجهزة",17,true));
         eventsView=text("",13,false);col.addView(eventsView);
         setContentView(scroll);updateLists();
     }
@@ -686,8 +687,12 @@ public final class MainActivity extends Activity {
             String persistenceNote = persistent
                     ? "\n\nوافقت على حفظ كلمة مرور الإدارة مشفرة في Android Keystore لاستعادة الخدمة إذا أوقف Android عملية التطبيق. لن تُحفظ كنص صريح، وستُمسح عند إيقاف الحارس أو انتهاء جلسة الحماية."
                     : "\n\nلم تختر حفظ كلمة المرور. ستواصل خدمة Foreground العمل عند إغلاق واجهة التطبيق ما دام Android يبقي الخدمة حية، لكن لن يمكن استعادتها تلقائياً إذا أنهى النظام عملية الخدمة.";
+            String notificationNote = Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ? "\n\nتنبيه: إذن إشعارات Android غير ممنوح حالياً؛ سيُسجل التطبيق أحداث الأجهزة داخلياً، لكن لن تظهر إشعارات الدخول والخروج حتى تسمح بالإشعارات من إعدادات الهاتف."
+                    : "\n\nعند ظهور جهاز أو اختفائه في لقطتين كاملتين متتاليتين، سيُسجل الحدث ويُرسل إشعاراً. تأكد من عدم تعطيل قناة إشعارات الأجهزة من إعدادات Android.";
             new AlertDialog.Builder(this).setTitle("تشغيل الحارس")
-              .setMessage("يتطلب نجاح اختبار الاتصال والقراءة أولاً، وتفعيل Allow List مسبقاً في الراوتر. سيحذف الحارس عنواناً واحداً غير معتمد في كل دورة، وقد ينقطع اتصال الأجهزة غير المدرجة. تأكد أن MAC جهاز الإدارة ضمن قائمتك. إذا ظهر HTTP 403 فلا تشغّل الحارس.\n\nلا يمكن منع انتحال MAC معتمد اعتماداً على عنوان MAC وحده." + persistenceNote)
+              .setMessage("يتطلب نجاح اختبار الاتصال والقراءة أولاً، وتفعيل Allow List مسبقاً في الراوتر. سيحذف الحارس عنواناً واحداً غير معتمد في كل دورة، وقد ينقطع اتصال الأجهزة غير المدرجة. تأكد أن MAC جهاز الإدارة ضمن قائمتك. إذا ظهر HTTP 403 فلا تشغّل الحارس.\n\nلا يمكن منع انتحال MAC معتمد اعتماداً على عنوان MAC وحده." + persistenceNote + notificationNote)
               .setPositiveButton("تشغيل",(d,w)->{
                   Intent i=new Intent(this,GuardService.class);i.setAction(GuardService.START);
                   i.putExtra(GuardService.EXTRA_HOST,host);i.putExtra(GuardService.EXTRA_PASS,password);

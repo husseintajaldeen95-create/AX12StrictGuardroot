@@ -6,11 +6,17 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.Manifest;
+import android.os.Build;
 import android.os.IBinder;
+import java.text.DateFormat;
+import java.util.Date;
 import java.util.List;
 import java.util.Set;
 
-/** Reconcile only the allow-list; never change parental controls, Wi-Fi passwords, or blacklist. */
+/** Guard the allow-list and observe connected-device presence; never change parental controls, Wi-Fi, or blacklist. */
 public final class GuardService extends Service {
     public static final String START = "com.ax12.strictguard.START";
     public static final String STOP = "com.ax12.strictguard.STOP";
@@ -19,6 +25,9 @@ public final class GuardService extends Service {
     public static final String EXTRA_PERSISTENT = "persistent_restart";
 
     private static final String CHANNEL = "strict_guard_v1";
+    private static final String DEVICE_EVENT_CHANNEL = "device_events_v1";
+    private static final String DEVICE_ALERT_CHANNEL = "device_alerts_v1";
+    private static final String EVENT_PREFS = "device_event_notifications_v1";
     private static final int MAX_REMOVALS_PER_CYCLE = 1;
     private volatile boolean active = false;
     private static volatile boolean running = false;
@@ -27,6 +36,8 @@ public final class GuardService extends Service {
     private GuardLog log;
     private NotificationManager notifier;
     private int consecutiveFailures = 0;
+    private boolean deviceSnapshotWarningLogged = false;
+    private boolean notificationPermissionWarningLogged = false;
 
     public static boolean isRunning() { return running; }
 
@@ -35,7 +46,15 @@ public final class GuardService extends Service {
         log = new GuardLog(this);
         notifier = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         notifier.createNotificationChannel(new NotificationChannel(
-                CHANNEL, "مراقبة قائمة MAC", NotificationManager.IMPORTANCE_LOW));
+                CHANNEL, "حالة الحارس", NotificationManager.IMPORTANCE_LOW));
+        NotificationChannel events = new NotificationChannel(
+                DEVICE_EVENT_CHANNEL, "اتصال الأجهزة وانقطاعها", NotificationManager.IMPORTANCE_DEFAULT);
+        events.setDescription("إشعارات عند ظهور جهاز في قائمة المتصلين أو اختفائه منها بعد التحقق من لقطتين متتاليتين");
+        notifier.createNotificationChannel(events);
+        NotificationChannel alerts = new NotificationChannel(
+                DEVICE_ALERT_CHANNEL, "تنبيهات الأجهزة غير المتوقعة", NotificationManager.IMPORTANCE_HIGH);
+        alerts.setDescription("تنبيهات للأجهزة التي تظهر متصلة ولا تتوافق مع قائمة الثقة وقائمة سماح الراوتر");
+        notifier.createNotificationChannel(alerts);
     }
 
     private Notification notifyText(String message) {
@@ -52,6 +71,127 @@ public final class GuardService extends Service {
     }
 
     private void update(String message) { notifier.notify(42, notifyText(message)); }
+
+    private boolean canPostNotifications(String channelId) {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            return false;
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel channel = notifier.getNotificationChannel(channelId);
+            if (channel != null && channel.getImportance() == NotificationManager.IMPORTANCE_NONE)
+                return false;
+        }
+        return true;
+    }
+
+    private synchronized int nextDeviceNotificationId() {
+        SharedPreferences prefs = getSharedPreferences(EVENT_PREFS, MODE_PRIVATE);
+        int id = prefs.getInt("next_id", 1000);
+        int next = id >= 2000000000 ? 1000 : id + 1;
+        prefs.edit().putInt("next_id", next).apply();
+        return id;
+    }
+
+    private String deviceClassification(String mac, Set<String> trusted, Set<String> allowed) {
+        boolean isTrusted = trusted.contains(mac);
+        boolean isAllowed = allowed.contains(mac);
+        if (isTrusted && isAllowed) return "موثوق في التطبيق وموجود في قائمة سماح الراوتر";
+        if (isTrusted) return "موثوق في التطبيق لكنه غير موجود في قائمة سماح الراوتر";
+        if (isAllowed) return "موجود في قائمة سماح الراوتر لكنه غير معتمد في قائمة التطبيق";
+        return "غير معتمد في التطبيق وغير موجود في قائمة سماح الراوتر";
+    }
+
+    private void publishDeviceEvents(List<DevicePresenceTracker.Event> events,
+                                     Set<String> trusted, Set<String> allowed) {
+        for (DevicePresenceTracker.Event event : events) {
+            DeviceInventory.ConnectedDevice device = event.device;
+            boolean arrived = event.type == DevicePresenceTracker.Type.ARRIVED;
+            String name = device.name.isEmpty() ? "اسم غير متاح" : device.name;
+            String classification = deviceClassification(device.mac, trusted, allowed);
+            String time = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM)
+                    .format(new Date());
+            StringBuilder details = new StringBuilder()
+                    .append("الاسم: ").append(name)
+                    .append("\nMAC: ").append(device.mac);
+            if (!device.ip.isEmpty()) details.append(arrived ? "\nIP الحالي: " : "\nآخر IP مرصود: ").append(device.ip);
+            if (!device.medium.isEmpty()) details.append("\nنوع الاتصال: ").append(device.medium);
+            details.append("\nالتصنيف: ").append(classification)
+                    .append("\nوقت الرصد: ").append(time);
+
+            log.add((arrived ? "اتصال مرصود: " : "اختفاء من قائمة المتصلين: ")
+                    + name + " | " + device.mac + " | " + classification);
+
+            boolean unexpectedArrival = arrived && !(trusted.contains(device.mac) && allowed.contains(device.mac));
+            String channel = unexpectedArrival ? DEVICE_ALERT_CHANNEL : DEVICE_EVENT_CHANNEL;
+            if (!canPostNotifications(channel)) {
+                if (!notificationPermissionWarningLogged) {
+                    log.add("إذن إشعارات Android أو قناة إشعارات الأجهزة معطّلة؛ سُجلت الأحداث داخل التطبيق لكن لن تظهر تنبيهات خارجية حتى تفعيل الإشعارات");
+                    notificationPermissionWarningLogged = true;
+                }
+                continue;
+            }
+
+            String title = arrived ? "اتصال جهاز بالشبكة" : "جهاز لم يعد ظاهراً على الشبكة";
+            String shortText = name + " • " + device.mac;
+            Notification.Builder builder = new Notification.Builder(this, channel)
+                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setContentTitle(title)
+                    .setContentText(shortText)
+                    .setStyle(new Notification.BigTextStyle().bigText(details.toString()))
+                    .setWhen(System.currentTimeMillis())
+                    .setAutoCancel(true)
+                    .setCategory(Notification.CATEGORY_STATUS)
+                    .setContentIntent(openAppPendingIntent());
+            try {
+                notifier.notify(nextDeviceNotificationId(), builder.build());
+            } catch (SecurityException denied) {
+                if (!notificationPermissionWarningLogged) {
+                    log.add("تعذر عرض إشعار جهاز بسبب صلاحية الإشعارات؛ راجع إعدادات Android");
+                    notificationPermissionWarningLogged = true;
+                }
+            }
+        }
+    }
+
+    private PendingIntent openAppPendingIntent() {
+        Intent open = new Intent(this, MainActivity.class);
+        return PendingIntent.getActivity(this, 1, open,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    /** Device-list errors are isolated from allow-list protection; unsupported status APIs
+     *  must not stop the existing strict guard. Session/auth failures still fail closed. */
+    private void pollDevicePresence(RouterClient client, DevicePresenceTracker tracker,
+                                    Set<String> trusted, Set<String> allowed) throws Exception {
+        try {
+            RouterClient.ConnectedSnapshot snapshot = client.readConnectedDevices();
+            if (!snapshot.completeSections) {
+                if (!deviceSnapshotWarningLogged) {
+                    log.add("رصد الأجهزة غير مكتمل: Firmware لم يُرجع قسمي الأجهزة السلكية واللاسلكية معاً؛ لن أستنتج دخولاً أو خروجاً من لقطة جزئية");
+                    deviceSnapshotWarningLogged = true;
+                }
+                return;
+            }
+            if (deviceSnapshotWarningLogged) {
+                log.add("استعاد الراوتر لقطة كاملة للأجهزة المتصلة؛ استؤنف رصد الدخول والخروج");
+                deviceSnapshotWarningLogged = false;
+            }
+            boolean baseline = !tracker.hasBaseline();
+            List<DevicePresenceTracker.Event> events = tracker.observe(snapshot.devices, true);
+            if (baseline) {
+                log.add("بدأ رصد حركة الأجهزة من لقطة أساس تضم " + tracker.confirmedOnlineCount()
+                        + " جهازاً؛ لن تُرسل إشعارات للأجهزة الموجودة قبل بدء الرصد");
+            } else if (!events.isEmpty()) {
+                publishDeviceEvents(events, trusted, allowed);
+            }
+        } catch (Exception e) {
+            if (client.isSessionInvalid() || AuthAttemptPolicy.isDenied(e.getMessage())) throw e;
+            if (!deviceSnapshotWarningLogged) {
+                log.add("تعذر قراءة قائمة الأجهزة المتصلة؛ استمر فحص قائمة السماح دون إصدار استنتاجات دخول/خروج: " + safeMessage(e));
+                deviceSnapshotWarningLogged = true;
+            }
+        }
+    }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) {
@@ -129,10 +269,12 @@ public final class GuardService extends Service {
     private void monitor(String host, String password) {
         RouterClient client = null;
         String lastResult = "";
+        DevicePresenceTracker presenceTracker = new DevicePresenceTracker();
         try {
             client = new RouterClient(this, host);
             client.login(password);
-            log.add("اتصال إدارة ناجح عبر " + client.getProtocolName() + ". بدء التحقق من القائمة البيضاء.");
+            log.add("اتصال إدارة ناجح عبر " + client.getProtocolName()
+                    + ". بدء فحص القائمة البيضاء ورصد ظهور الأجهزة واختفائها من قوائم الراوتر.");
             while (active && !Thread.currentThread().isInterrupted()) {
                 try {
                     RouterClient.Settings settings = client.readSettings();
@@ -168,6 +310,9 @@ public final class GuardService extends Service {
                     }
 
                     Set<String> actual = client.readAllowed();
+                    // Presence monitoring is read-only and isolated: an unsupported status endpoint
+                    // does not disable the existing allow-list guard.
+                    pollDevicePresence(client, presenceTracker, trusted, actual);
                     List<String> unauthorized = MacPolicy.unauthorized(actual, trusted, settings.protectedHost);
                     if (!unauthorized.isEmpty()) {
                         log.add("اكتُشف " + unauthorized.size() + " MAC غير مصرح به في Allow List");
