@@ -35,6 +35,18 @@ public final class DevicePresenceTracker {
     public synchronized boolean hasBaseline() { return initialized; }
 
     /**
+     * Drop the old baseline after a prolonged period in which router status could
+     * not be read. The next complete snapshot becomes a silent baseline so that
+     * devices changing during the outage do not generate misleading late events.
+     */
+    public synchronized void reset() {
+        confirmedOnline.clear();
+        pendingArrivals.clear();
+        pendingDepartures.clear();
+        initialized = false;
+    }
+
+    /**
      * Observe one router snapshot. Incomplete snapshots are ignored completely:
      * they cannot create arrivals or falsely mark devices as disconnected.
      */

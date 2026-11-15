@@ -39,6 +39,46 @@ import javax.crypto.spec.SecretKeySpec;
  * Compatibility with every regional firmware is not guaranteed. Use only on a router you administer.
  */
 public final class RouterClient {
+    /**
+     * Safe diagnostic for an endpoint response that is empty or does not match
+     * the expected JSON shape. It never stores or exposes the raw response.
+     */
+    public static final class RouterResponseException extends IllegalStateException {
+        public final String endpoint;
+        public final boolean emptyResponse;
+
+        RouterResponseException(String endpoint, String detail, boolean emptyResponse) {
+            super("استجابة الراوتر غير صالحة أثناء " + endpoint + ": " + detail);
+            this.endpoint = endpoint;
+            this.emptyResponse = emptyResponse;
+        }
+
+        RouterResponseException(String endpoint, String detail, boolean emptyResponse, Throwable cause) {
+            super("استجابة الراوتر غير صالحة أثناء " + endpoint + ": " + detail, cause);
+            this.endpoint = endpoint;
+            this.emptyResponse = emptyResponse;
+        }
+    }
+
+    private static JSONObject parseJsonObject(String raw, String endpoint, String stage) {
+        if (raw == null || raw.trim().isEmpty()) {
+            throw new RouterResponseException(endpoint, stage + " فارغة", true);
+        }
+        try {
+            return new JSONObject(raw);
+        } catch (JSONException e) {
+            throw new RouterResponseException(endpoint,
+                    stage + " ليست كائن JSON صالحاً (طول الرد " + raw.length() + " حرفاً)",
+                    false, e);
+        }
+    }
+
+    private static String safeExceptionMessage(Exception error) {
+        if (error == null) return "خطأ غير معروف";
+        String message = error.getMessage();
+        return error.getClass().getSimpleName()
+                + (message == null || message.trim().isEmpty() ? "" : ": " + message);
+    }
     private final String host;
     private final Context appContext;
     private boolean ownsLoginGate;
@@ -121,9 +161,7 @@ public final class RouterClient {
         AuthAttemptGate.beginProbe();
         try {
             String raw = postRaw("device_config?form=config", encodeForm(form("operation", "read")), true, false);
-            JSONObject root;
-            try { root = new JSONObject(raw); }
-            catch (JSONException e) { throw new IllegalStateException("ردّ الفحص ليس JSON؛ لا يمكن تأكيد نوع المصادقة دون فحص أدق", e); }
+            JSONObject root = parseJsonObject(raw, "device_config?form=config", "رد فحص التهيئة");
             JSONObject data = root.optJSONObject("data");
             JSONArray cert = data == null ? null : data.optJSONArray("certification");
             if (cert == null)
@@ -146,11 +184,8 @@ public final class RouterClient {
     /** Avoid guessing a login protocol when the router has not confirmed its profile. */
     private boolean detectEnhancedProfile() throws Exception {
         String raw = postRaw("device_config?form=config", encodeForm(form("operation", "read")), true, false);
-        JSONObject config;
-        try { config = new JSONObject(raw); }
-        catch (JSONException e) {
-            throw new IllegalStateException("لا يمكن تحديد بروتوكول المصادقة: استجابة التهيئة ليست JSON. لم تُرسل كلمة المرور.", e);
-        }
+        JSONObject config = parseJsonObject(raw, "device_config?form=config",
+                "استجابة تحديد بروتوكول المصادقة");
         JSONObject data = config.optJSONObject("data");
         if (data == null)
             throw new IllegalStateException("لا يمكن تحديد بروتوكول المصادقة من رد التهيئة. لم تُرسل كلمة المرور.");
@@ -215,9 +250,15 @@ public final class RouterClient {
         String requestBody = "sign=" + signature + "&data=" + URLEncoder.encode(encryptedData, "UTF-8");
         String rawResponse = postRaw("login?form=login", requestBody, true, true);
 
-        JSONObject wrapper = new JSONObject(rawResponse);
-        String encryptedResponse = wrapper.getString("data");
-        JSONObject decoded = new JSONObject(aesDecrypt(encryptedResponse));
+        JSONObject wrapper = parseJsonObject(rawResponse, "login?form=login",
+                "الغلاف الخارجي لاستجابة تسجيل الدخول");
+        Object encryptedValue = wrapper.opt("data");
+        if (!(encryptedValue instanceof String) || ((String) encryptedValue).trim().isEmpty()) {
+            throw new RouterResponseException("login?form=login",
+                    "حقل data المشفر مفقود أو فارغ", true);
+        }
+        JSONObject decoded = parseJsonObject(aesDecrypt((String) encryptedValue),
+                "login?form=login", "الاستجابة المفكوكة لتسجيل الدخول");
         requireSuccess(decoded, "login?form=login [SG: رد مفكوك التشفير]");
         this.token = requiredData(decoded).getString("stok");
     }
@@ -325,12 +366,7 @@ public final class RouterClient {
 
     private JSONObject requestPlain(String path, Map<String, String> values, boolean loginPhase, boolean loginReferer) throws Exception {
         String raw = postRaw(path, encodeForm(values), loginPhase, loginReferer);
-        JSONObject json;
-        try {
-            json = new JSONObject(raw);
-        } catch (JSONException e) {
-            throw new IllegalStateException("استجابة غير JSON من الراوتر أثناء " + path + ": " + compact(raw, 220), e);
-        }
+        JSONObject json = parseJsonObject(raw, path, "استجابة الراوتر");
         requireSuccess(json, path);
         return json;
     }
@@ -346,8 +382,13 @@ public final class RouterClient {
             String signature = hmacSignature(encryptedData.length());
             String body = "sign=" + signature + "&data=" + URLEncoder.encode(encryptedData, "UTF-8");
             String raw = postRaw(path, body, false, false);
-            JSONObject wrapper = new JSONObject(raw);
-            JSONObject decoded = new JSONObject(aesDecrypt(wrapper.getString("data")));
+            JSONObject wrapper = parseJsonObject(raw, path, "الغلاف الخارجي للاستجابة المشفرة");
+            Object encryptedValue = wrapper.opt("data");
+            if (!(encryptedValue instanceof String) || ((String) encryptedValue).trim().isEmpty()) {
+                throw new RouterResponseException(path, "حقل data المشفر مفقود أو فارغ", true);
+            }
+            JSONObject decoded = parseJsonObject(aesDecrypt((String) encryptedValue),
+                    path, "الاستجابة المفكوكة");
             requireSuccess(decoded, path);
             return decoded;
         } catch (Exception e) {
@@ -398,6 +439,10 @@ public final class RouterClient {
                 if (status == HttpURLConnection.HTTP_FORBIDDEN)
                     message += "؛ قد تكون المصادقة أو التوقيع غير متوافقين، وليس بالضرورة حظراً لمدة محددة";
                 throw new IllegalStateException(message);
+            }
+            if (responseText == null || responseText.trim().isEmpty()) {
+                throw new RouterResponseException(path,
+                        "أعاد الراوتر استجابة HTTP " + status + " فارغة", true);
             }
             return responseText;
         } finally {
@@ -593,20 +638,47 @@ public final class RouterClient {
      * Throws rather than labeling all devices offline on unsupported firmware.
      */
     public ConnectedSnapshot readConnectedDevices() throws Exception {
-        JSONObject data = requiredData(apiOnPath("admin/status", "all", "read", formEmpty()));
-        Object wired = data.opt("access_devices_wired");
-        Object wireless = data.opt("access_devices_wireless_host");
-        if (!(wired instanceof JSONArray) && !(wireless instanceof JSONArray))
-            throw new IllegalStateException("لا يعرض Firmware حقول الأجهزة المتصلة المتوقعة؛ لا يمكن تحديد المتصلين");
-        if (wired != null && !(wired instanceof JSONArray)
-                || wireless != null && !(wireless instanceof JSONArray))
-            throw new IllegalStateException("صيغة قائمة الأجهزة المتصلة غير متوقعة؛ أُلغيت المقارنة");
-        List<DeviceInventory.ConnectedDevice> out = new ArrayList<>();
-        readClientArray((JSONArray) wired, "سلكي", out);
-        readClientArray((JSONArray) wireless, "لاسلكي", out);
-        // A missing wired or wireless section is reported as partial rather than
-        // assuming that no clients exist on the omitted transport.
-        return new ConnectedSnapshot(out, wired instanceof JSONArray && wireless instanceof JSONArray);
+        final String endpoint = "admin/status?form=all";
+        final JSONObject response;
+        try {
+            response = apiOnPath("admin/status", "all", "read", formEmpty());
+        } catch (Exception e) {
+            if (e instanceof RouterResponseException) throw e;
+            throw new RouterResponseException(endpoint,
+                    "تعذر طلب قائمة الأجهزة المتصلة: " + safeExceptionMessage(e), false, e);
+        }
+
+        JSONObject data = response.optJSONObject("data");
+        if (data == null) {
+            throw new RouterResponseException(endpoint,
+                    "الاستجابة لا تحتوي على كائن data", false);
+        }
+
+        try {
+            Object wired = data.opt("access_devices_wired");
+            Object wireless = data.opt("access_devices_wireless_host");
+            if (!(wired instanceof JSONArray) && !(wireless instanceof JSONArray)) {
+                throw new RouterResponseException(endpoint,
+                        "Firmware لم يُرجع مصفوفتَي الأجهزة السلكية واللاسلكية المتوقعَتين", false);
+            }
+            if ((wired != null && !(wired instanceof JSONArray))
+                    || (wireless != null && !(wireless instanceof JSONArray))) {
+                throw new RouterResponseException(endpoint,
+                        "صيغة أحد قسمي الأجهزة المتصلة غير متوقعة", false);
+            }
+            List<DeviceInventory.ConnectedDevice> out = new ArrayList<>();
+            readClientArray((JSONArray) wired, "سلكي", out);
+            readClientArray((JSONArray) wireless, "لاسلكي", out);
+            // A missing wired or wireless section is reported as partial rather than
+            // assuming that no clients exist on the omitted transport.
+            return new ConnectedSnapshot(out,
+                    wired instanceof JSONArray && wireless instanceof JSONArray);
+        } catch (RouterResponseException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RouterResponseException(endpoint,
+                    "تعذر تفسير بيانات الأجهزة: " + safeExceptionMessage(e), false, e);
+        }
     }
 
     public static final class ConnectedSnapshot {

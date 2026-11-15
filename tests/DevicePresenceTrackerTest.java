@@ -50,7 +50,18 @@ public final class DevicePresenceTrackerTest {
         departed = tracker.observe(Collections.<DeviceInventory.ConnectedDevice>emptyList(), true);
         check(departed.size() == 1 && departed.get(0).type == DevicePresenceTracker.Type.DEPARTED,
                 "empty complete snapshots confirm departure");
-        System.out.println("PASS: 17 DevicePresenceTracker checks");
+
+        // After a prolonged status-endpoint outage, reset and take a new silent baseline.
+        DevicePresenceTracker resumed = new DevicePresenceTracker();
+        check(resumed.observe(Collections.singletonList(d(a, "A")), true).isEmpty(),
+                "pre-outage baseline is silent");
+        resumed.reset();
+        check(!resumed.hasBaseline() && resumed.confirmedOnlineCount() == 0,
+                "reset clears stale baseline and pending state");
+        check(resumed.observe(Collections.singletonList(d(b, "B")), true).isEmpty()
+                        && resumed.confirmedOnlineCount() == 1,
+                "first snapshot after reset is a new silent baseline");
+        System.out.println("PASS: 20 DevicePresenceTracker checks");
     }
     public static void main(String[] args) { run(); }
 }

@@ -7,8 +7,8 @@ android {
         applicationId 'com.ax12.strictguard'
         minSdk 26
         targetSdk 32
-        versionCode 12
-        versionName '0.2.1-session-recovery'
+        versionCode 13
+        versionName '0.2.2-presence-isolation'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

@@ -11,6 +11,7 @@ import android.content.pm.PackageManager;
 import android.Manifest;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.SystemClock;
 import java.text.DateFormat;
 import java.util.Date;
 import java.util.List;
@@ -29,6 +30,8 @@ public final class GuardService extends Service {
     private static final String DEVICE_ALERT_CHANNEL = "device_alerts_v1";
     private static final String EVENT_PREFS = "device_event_notifications_v1";
     private static final int MAX_REMOVALS_PER_CYCLE = 1;
+    // The optional admin/status endpoint must not repeatedly break the core allow-list guard.
+    private static final long DEVICE_PRESENCE_RETRY_MS = 5L * 60L * 1000L;
     private volatile boolean active = false;
     private static volatile boolean running = false;
     private volatile boolean explicitStopRequested = false;
@@ -185,7 +188,8 @@ public final class GuardService extends Service {
                 publishDeviceEvents(events, trusted, allowed);
             }
         } catch (Exception e) {
-            if (client.isSessionInvalid() || AuthAttemptPolicy.isDenied(e.getMessage())) throw e;
+            if (e instanceof RouterClient.RouterResponseException
+                    || client.isSessionInvalid() || AuthAttemptPolicy.isDenied(e.getMessage())) throw e;
             if (!deviceSnapshotWarningLogged) {
                 log.add("تعذر قراءة قائمة الأجهزة المتصلة؛ استمر فحص قائمة السماح دون إصدار استنتاجات دخول/خروج: " + safeMessage(e));
                 deviceSnapshotWarningLogged = true;
@@ -271,6 +275,8 @@ public final class GuardService extends Service {
         String lastResult = "";
         String safetyPauseReason = "";
         int consecutiveFailures = 0;
+        long presenceRetryUntilElapsed = 0L;
+        boolean presenceBaselineResetRequired = false;
 
         // Keep the foreground service alive while router sessions are renewed. A lost
         // session is not the same as a user-requested stop.
@@ -345,10 +351,9 @@ public final class GuardService extends Service {
                             safetyPauseReason = "";
                         }
 
+                        // Enforce the core allow-list policy before attempting the optional device-status
+                        // endpoint. A failure in presence monitoring must never block this cycle's guard.
                         Set<String> actual = client.readAllowed();
-                        // Presence monitoring is read-only and isolated: an unsupported status endpoint
-                        // does not disable the existing allow-list guard.
-                        pollDevicePresence(client, presenceTracker, trusted, actual);
                         List<String> unauthorized = MacPolicy.unauthorized(actual, trusted, settings.protectedHost);
                         if (!unauthorized.isEmpty()) {
                             log.add("اكتُشف " + unauthorized.size() + " MAC غير مصرح به في Allow List");
@@ -366,13 +371,53 @@ public final class GuardService extends Service {
                             update("الحماية فعالة؛ القائمة البيضاء مطابقة");
                             lastResult = "healthy";
                         }
+
+                        // Device presence is an optional, read-only feature. If this firmware
+                        // returns an empty/unsupported admin/status response, pause only this
+                        // feature and continue enforcing the allow list on a fresh/valid session.
+                        long elapsedNow = SystemClock.elapsedRealtime();
+                        if (presenceRetryUntilElapsed > elapsedNow) {
+                            update("الحارس يحمي القائمة البيضاء؛ رصد الأجهزة متوقف مؤقتاً");
+                        } else {
+                            if (presenceBaselineResetRequired) {
+                                presenceTracker.reset();
+                                presenceBaselineResetRequired = false;
+                            }
+                            try {
+                                pollDevicePresence(client, presenceTracker, trusted, actual);
+                                presenceRetryUntilElapsed = 0L;
+                            } catch (RouterClient.RouterResponseException endpointError) {
+                                if (endpointError.endpoint == null
+                                        || !endpointError.endpoint.startsWith("admin/status")) {
+                                    throw endpointError;
+                                }
+                                presenceRetryUntilElapsed = SystemClock.elapsedRealtime()
+                                        + DEVICE_PRESENCE_RETRY_MS;
+                                presenceBaselineResetRequired = true;
+                                if (client.isSessionInvalid()) throw endpointError;
+                                log.add("تعذر رصد الأجهزة عبر admin/status: " + safeMessage(endpointError)
+                                        + ". أوقفت هذا الفحص الاختياري لمدة 5 دقائق؛ ستستمر حماية Allow List.");
+                                update("الحارس مستمر في حماية القائمة البيضاء؛ رصد الأجهزة متوقف مؤقتاً");
+                            }
+                        }
+
                         consecutiveFailures = 0;
                         pause(15000L);
                     } catch (Exception e) {
                         String rawMessage = e.getMessage();
                         String message = safeMessage(e);
-                        log.add("تعذر فحص الحماية: " + message);
-                        update("الحارس مستمر؛ تعذر فحص الراوتر مؤقتاً");
+                        boolean presenceEndpointFailure =
+                                e instanceof RouterClient.RouterResponseException
+                                && ((RouterClient.RouterResponseException) e).endpoint != null
+                                && ((RouterClient.RouterResponseException) e).endpoint.startsWith("admin/status");
+                        if (presenceEndpointFailure) {
+                            log.add("تعذر فحص الأجهزة المتصلة بعد إتمام مراجعة Allow List: " + message
+                                    + ". سيُعلّق رصد الأجهزة خمس دقائق؛ تبقى سياسة القائمة البيضاء هي مسار الحماية الأساسي.");
+                            update("تمت مراجعة القائمة البيضاء؛ يجري التعامل مع تعذر رصد الأجهزة");
+                        } else {
+                            log.add("تعذر فحص الحماية: " + message);
+                            update("الحارس مستمر؛ تعذر فحص الراوتر مؤقتاً");
+                        }
 
                         if (client.isSessionInvalid() || AuthAttemptPolicy.isDenied(rawMessage)) {
                             long gateRemaining = AuthAttemptGate.remainingCooldownMs(this);
@@ -380,6 +425,9 @@ public final class GuardService extends Service {
                             if (AuthAttemptPolicy.isDenied(rawMessage)) {
                                 log.add("يبدو أن الراوتر رفض الجلسة أو استُبدلت بجلسة إدارة أخرى؛ أبقيت خدمة الحارس والإشعار الأمامي فعالين، وأجّلت محاولة الدخول لتجنب تكرار المصادقة. قد لا يسمح Firmware بجلسة متصفح وتطبيق متزامنتين.");
                                 update("الحارس يعمل وينتظر استعادة جلسة الراوتر؛ قد تكون جلسة الإدارة مستخدمة من المتصفح");
+                            } else if (presenceEndpointFailure) {
+                                log.add("أصبحت جلسة الإدارة غير موثوقة أثناء طلب admin/status؛ لن أستخدمها مجدداً. ستُنشأ جلسة جديدة وفق مهلة الأمان، وستستمر مراجعة Allow List بعد نجاحها.");
+                                update("الحارس مستمر؛ يعيد إنشاء جلسة الإدارة بعد تعذر رصد الأجهزة");
                             } else {
                                 log.add("انتهت جلسة الإدارة أو أصبحت قراءة التوقيع غير موثوقة؛ لم أستخدم الجلسة القديمة مجدداً. ستبقى الخدمة فعالة وستنشئ جلسة جديدة بعد مهلة قصيرة.");
                                 update("الحارس مستمر؛ يعيد إنشاء جلسة الراوتر بعد انقطاع مؤقت");
