@@ -1,47 +1,45 @@
-# تحديث AX12 Strict Guard إلى الإصدار 0.2.1-session-recovery
+# تحديث AX12 Strict Guard إلى الإصدار 0.2.3-parental-probe
 
 هذه حزمة مصدر كاملة. ارفع محتويات المجلد `AX12StrictGuardroot-main` إلى جذر مستودع GitHub الحالي، مع استبدال الملفات ذات المسارات نفسها. لا تنشئ مستودعاً جديداً ولا تضع المجلد الأب داخل المستودع كطبقة إضافية.
 
-## أهم الملفات التي تغيرت
+## أهم الملفات الجديدة والمعدلة
 
-- `app/src/main/java/com/ax12/strictguard/GuardService.java`: إبقاء خدمة Foreground فعالة بعد انتهاء جلسة الراوتر وإعادة الاتصال بأمان.
-- `app/src/main/java/com/ax12/strictguard/GuardRecoveryPolicy.java`: ملف جديد يحدد مهلة الاستعادة.
-- `app/src/main/java/com/ax12/strictguard/AuthAttemptGate.java`: إضافة قراءة مدة المهلة المتبقية دون اتصال بالراوتر.
-- `app/src/main/java/com/ax12/strictguard/MainActivity.java`: تحديث شرح الحفظ الآمن وإضافة اختصار إعدادات بطارية التطبيق.
-- `app/build.gradle`: `versionCode 12` و`versionName 0.2.1-session-recovery`.
-- `tests/GuardRecoveryPolicyTest.java`: اختبارات جديدة لسياسة الاستعادة.
-- `tests/run_mac_tests.sh`: إدراج اختبارات الاستعادة.
-- ملفات التوثيق: `CHANGELOG_AR.md`, `PROJECT_STATUS.md`, `README.md`, `README_AR.md`, `SESSION_RECOVERY_AR.md`.
+- `app/src/main/java/com/ax12/strictguard/ParentalControlProbe.java` — قائمة الواجهات المرشحة، وتصنيف استجابات القراءة، والتعرف على أسماء حقول الجدولة.
+- `app/src/main/java/com/ax12/strictguard/RouterClient.java` — إضافة فحص `read/load` فقط مع التعامل الآمن مع رفض واجهة غير مدعومة دون إفساد الجلسة تلقائياً.
+- `app/src/main/java/com/ax12/strictguard/MainActivity.java` — زر فحص الرقابة الأبوية، عرض التقرير، ونسخه إلى الحافظة.
+- `app/build.gradle` — `versionCode 14` و`versionName 0.2.3-parental-probe`.
+- `tests/ParentalControlProbeTest.java` — 19 اختباراً لتصنيف الواجهات وحقول الوقت والجدولة.
+- `tests/run_mac_tests.sh` — إدراج الاختبار الجديد.
+- `PARENTAL_CONTROL_DIAGNOSTIC_AR.md` — شرح الواجهات وطريقة تشغيل الفحص وتفسير التقرير.
+- `PROJECT_STATUS.md`, `CHANGELOG_AR.md`, `README_AR.md`, `README_CLOUD_BUILD.txt` — تحديث وصف الإصدار وحدود التحقق.
 
 ## ملف Workflow
 
-ملف `.github/workflows/main.yml` لم يتغير. يمكنك إبقاء ملفك الحالي كما هو، بشرط أن يكون في المسار نفسه:
+ملف `.github/workflows/main.yml` لم يتغير. يمكنك إبقاء ملفك الحالي كما هو، بشرط أن يكون في المسار نفسه. لا تنشئ ملف Workflow ثانياً بالاسم نفسه.
 
-` .github/workflows/main.yml `
-
-لا تنشئ ملف `main.yml` آخر بالاسم نفسه.
-
-## طريقة الرفع
+## طريقة الرفع والبناء
 
 1. احتفظ بنسخة خارجية من قائمة MAC المحلية، ولا تحذف التطبيق من الهاتف الآن.
 2. فك ضغط الحزمة على الحاسوب.
 3. افتح مجلد `AX12StrictGuardroot-main` وتأكد أن `app` و`tests` و`settings.gradle` ظاهرة مباشرة داخله.
-4. ارفع محتويات المجلد إلى جذر المستودع الحالي، مع استبدال الملفات المتطابقة بالاسم والمسار. تأكد من تضمين الملف الجديد `GuardRecoveryPolicy.java` والاختبار الجديد `GuardRecoveryPolicyTest.java`.
-5. إذا لم ترد استبدال Workflow، اترك `.github/workflows/main.yml` الموجود في GitHub كما هو.
+4. ارفع محتويات المجلد إلى جذر المستودع الحالي، مع استبدال الملفات المتطابقة بالاسم والمسار، وتأكد من تضمين الملف الجديد `ParentalControlProbe.java` والاختبار الجديد `ParentalControlProbeTest.java` وملف التوثيق.
+5. اترك `.github/workflows/main.yml` الموجود في المستودع إذا كان مطابقاً للحزمة.
 6. نفّذ Commit changes ثم افتح Actions وانتظر نجاح Build Android APK.
 7. نزّل APK من Artifacts. لا تثبته قبل التأكد من نجاح Workflow.
 
-## قبل اعتماد الإصدار على الهاتف
+## تشغيل فحص الرقابة الأبوية بعد التثبيت
 
-- فعّل خيار حفظ كلمة المرور المشفرة في Android Keystore عند تشغيل الحارس إذا أردت استعادة الخدمة بعد إعادة إنشاء Android لها.
-- من زر «فتح إعدادات التطبيق والبطارية»، اجعل استخدام البطارية غير مقيّد واسمح بالتشغيل التلقائي إن توفر.
-- لا تستخدم Force Stop؛ Android يمنع إعادة تشغيل التطبيق قسراً حتى يفتحه المستخدم مجدداً.
-- اختبر أولاً استمرار الحارس والشاشة مطفأة، ثم اختبر فتح إعدادات الراوتر من Chrome. إذا كان Firmware لا يسمح إلا بجلسة إدارة واحدة فقد تتعارض جلسة Chrome مع جلسة التطبيق؛ لا يمكن ضمان التزامن دون دعم الراوتر له.
+1. أوقف «المراقبة الصارمة».
+2. أدخل عنوان الراوتر وكلمة مرور الإدارة.
+3. نفّذ «1. اختبار الاتصال (قراءة فقط)» وانتظر نجاحه.
+4. نفّذ «فحص دعم الرقابة الأبوية والجداول (قراءة فقط)».
+5. انسخ التقرير من زر «نسخ تقرير فحص الرقابة الأبوية» وأرسله للمراجعة.
 
-## الاختبارات
+الفحص يرسل فقط عمليتي `read` و`load` لأربع واجهات مرشحة؛ لا يغيّر Parental Controls أو أي إعداد آخر. لا تترك جلسة المتصفح مفتوحة أثناء الاختبار إذا كان Firmware يسمح بجلسة إدارة واحدة فقط. لا تكرر الضغط إذا رفض الراوتر المصادقة.
 
-نجحت 108 اختبارات Java منطقية عند تنفيذ:
+## نتائج التحقق قبل التسليم
 
-`sh tests/run_mac_tests.sh`
-
-لم يُبنَ APK محلياً لعدم توفر Android SDK وGradle في بيئة التحرير؛ يجب أن يؤكد GitHub Actions بناء Android.
+- اجتازت اختبارات Java المنطقية 130 فحصاً.
+- تم فحص صياغة `RouterClient.java` باستخدام واجهات Android/JSON تجريبية، ولم يظهر خطأ ترجمة في هذا الجزء.
+- لم يتوفر Gradle أو Android SDK، لذلك لم يُبنَ APK كاملاً في بيئة التحرير.
+- لم يُجرَ اتصال حي بالراوتر؛ نتيجة دعم واجهات الرقابة الأبوية ستظهر فقط بعد تشغيل الفحص على جهاز المستخدم.

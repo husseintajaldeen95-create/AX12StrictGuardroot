@@ -42,7 +42,8 @@ public final class MainActivity extends Activity {
     private final Handler ui=new Handler(Looper.getMainLooper());
     private EditText hostField,passwordField,macField;
     private CheckBox persistCredentialsCheck;
-    private TextView trustedView,eventsView,statusView,authStateView,inventorySummaryView,inventoryMetaView;
+    private TextView trustedView,eventsView,statusView,authStateView,inventorySummaryView,inventoryMetaView,parentalProbeView;
+    private String lastParentalProbeReport = "";
     private LinearLayout inventoryRows;
     private TextView selectionMetaView;
     private Button applySelectionButton;
@@ -86,7 +87,7 @@ public final class MainActivity extends Activity {
         ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setPadding(20,20,20,25);col.setOrientation(LinearLayout.VERTICAL);
         col.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);scroll.addView(col);
         TextView title=text("AX12 STRICT GUARD",24,true); title.setTextColor(Color.rgb(18,94,122)); col.addView(title);
-        col.addView(text("إدارة قائمة السماح ورصد الأجهزة – 0.2.1",14,false));
+        col.addView(text("إدارة قائمة السماح ورصد الأجهزة – 0.2.3",14,false));
         col.addView(text("لا يُضاف أي MAC تلقائياً إلى قائمة الثقة. عند تشغيل الحارس تُراجع قائمة الراوتر كل 15 ثانية وتُزال الإدخالات غير المعتمدة.",14,false));
         col.addView(text("أثناء عمل الحارس، يرصد التطبيق ظهور الأجهزة واختفاءها من قائمة المتصلين ويرسل إشعارات بذلك بعد تأكيد التغيير في قراءتين كاملتين متتاليتين. القراءة الأولى خط أساس ولا تُصدر إشعارات للأجهزة الموجودة مسبقاً. هذه الميزة للقراءة فقط ولا تغيّر إعدادات الراوتر.",13,false));
         col.addView(text("تُرفض عناوين MAC المحلية الإدارة (Private/Randomized) من قائمة الثقة. قبول MAC عالمي الإدارة لا يثبت أنه أصلي ولا يمنع انتحاله. لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
@@ -103,6 +104,10 @@ public final class MainActivity extends Activity {
         col.addView(button("حذف كلمة المرور المشفرة المحفوظة", this::clearSavedCredential));
         col.addView(button("فحص بروتوكول الراوتر دون تسجيل الدخول",this::probeCompatibility));
         col.addView(button("1. اختبار الاتصال (قراءة فقط)",this::testConnection));
+        col.addView(button("فحص دعم الرقابة الأبوية والجداول (قراءة فقط)",this::probeParentalControls));
+        parentalProbeView=text("لم يُجرَ فحص واجهات الرقابة الأبوية بعد. أوقف المراقبة، اختبر الاتصال أولاً، ثم نفّذ الفحص.",13,false);
+        col.addView(parentalProbeView);
+        col.addView(button("نسخ تقرير فحص الرقابة الأبوية",this::copyParentalProbeReport));
         col.addView(text("حالة المصادقة: المهلة المعروضة للتطبيق فقط، ولا تؤكد زمن الحظر في الراوتر.",13,true));
         authStateView=text("",13,false);col.addView(authStateView);
         col.addView(button("عرض وقت آخر رفض ومهلة التطبيق دون اتصال بالراوتر",this::showAuthStatus));
@@ -272,6 +277,67 @@ public final class MainActivity extends Activity {
             },"AX12-ReadTest").start();
         }catch(Exception e){error(e.getMessage());}
     }
+    /** Runs a bounded, read-only probe of candidate Smart Network/Patrol forms. */
+    private void probeParentalControls() {
+        try {
+            if (GuardService.isRunning() || testingConnection || probingCompatibility
+                    || loadingInventory || modifyingRouter || selectionBusy)
+                throw new IllegalStateException("أوقف المراقبة وأي اختبار أو تعديل آخر قبل فحص الرقابة الأبوية؛ الراوتر قد يسمح بجلسة إدارة واحدة فقط");
+            requirePassword();
+            String host = routerHost();
+            String password = passwordField.getText().toString();
+            requireSuccessfulReadTest(host, password);
+            loadingInventory = true;
+            parentalProbeView.setText("جارٍ فحص أربع واجهات مرشحة بطلبات read/load فقط؛ لن تُغيّر أي إعدادات...");
+            new Thread(() -> {
+                RouterClient client = null;
+                try {
+                    client = new RouterClient(this, host);
+                    client.login(password);
+                    RouterClient.ParentalControlReport report = client.probeParentalControlsReadOnly();
+                    String formatted = report.toArabicText();
+                    boolean sessionInvalid = report.sessionInvalid;
+                    ui.post(() -> {
+                        lastParentalProbeReport = formatted;
+                        parentalProbeView.setText(formatted);
+                        log.add(report.toLogSummary());
+                        if (sessionInvalid) {
+                            routerReadTestPassed = false;
+                            testedHost = null;
+                            testedPasswordFingerprint = null;
+                        }
+                        updateLists();
+                    });
+                } catch (Exception error) {
+                    String message = error.getMessage() == null
+                            ? error.getClass().getSimpleName() : AuthErrorLabel.safeValue(error.getMessage());
+                    ui.post(() -> {
+                        lastParentalProbeReport = "تعذر إكمال فحص الرقابة الأبوية: " + message
+                                + "\nلم تُرسل أي طلبات كتابة أو تعديل. أعد اختبار الاتصال قبل محاولة جديدة.";
+                        parentalProbeView.setText(lastParentalProbeReport);
+                        log.add("تعذر فحص واجهات الرقابة الأبوية: " + message);
+                        updateLists();
+                    });
+                } finally {
+                    if (client != null) client.close();
+                    ui.post(() -> { loadingInventory = false; updateSelectionControls(); });
+                }
+            }, "AX12-ParentalReadOnlyProbe").start();
+        } catch (Exception error) {
+            error(error.getMessage());
+        }
+    }
+
+    private void copyParentalProbeReport() {
+        if (lastParentalProbeReport == null || lastParentalProbeReport.trim().isEmpty()) {
+            error("لا يوجد تقرير لنسخه؛ نفّذ الفحص أولاً.");
+            return;
+        }
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(ClipData.newPlainText("AX12 Parental Control Probe", lastParentalProbeReport));
+        error("نُسخ التقرير إلى الحافظة. يمكنك إرساله هنا لتحليل نتيجة الراوتر.");
+    }
+
     private void confirmAllow(){
         try {
             if (selectionEdited) throw new IllegalStateException("طبّق تحديدات الأجهزة أو تراجع عنها أولاً.");

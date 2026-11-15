@@ -365,13 +365,26 @@ public final class RouterClient {
     }
 
     private JSONObject requestPlain(String path, Map<String, String> values, boolean loginPhase, boolean loginReferer) throws Exception {
+        return requestPlain(path, values, loginPhase, loginReferer, true);
+    }
+
+    /** Diagnostic variant may inspect a structured router refusal without treating
+     *  an unsupported optional form as a broken administrator session. */
+    private JSONObject requestPlain(String path, Map<String, String> values,
+                                    boolean loginPhase, boolean loginReferer,
+                                    boolean enforceSuccess) throws Exception {
         String raw = postRaw(path, encodeForm(values), loginPhase, loginReferer);
         JSONObject json = parseJsonObject(raw, path, "استجابة الراوتر");
-        requireSuccess(json, path);
+        if (enforceSuccess) requireSuccess(json, path);
         return json;
     }
 
     private JSONObject requestEnhanced(String path, Map<String, String> values) throws Exception {
+        return requestEnhanced(path, values, true);
+    }
+
+    private JSONObject requestEnhanced(String path, Map<String, String> values,
+                                       boolean enforceSuccess) throws Exception {
         if (sessionInvalid) throw new IllegalStateException("جلسة الراوتر غير موثوقة بعد فشل طلب سابق؛ لن يُرسل طلب آخر");
         if (aesKey == null || aesIv == null || rollingHash == null)
             throw new IllegalStateException("جلسة SG غير مكتملة");
@@ -389,7 +402,7 @@ public final class RouterClient {
             }
             JSONObject decoded = parseJsonObject(aesDecrypt((String) encryptedValue),
                     path, "الاستجابة المفكوكة");
-            requireSuccess(decoded, path);
+            if (enforceSuccess) requireSuccess(decoded, path);
             return decoded;
         } catch (Exception e) {
             // Even a network timeout can leave the encrypted signing state ambiguous.
@@ -702,6 +715,298 @@ public final class RouterClient {
             String medium = row.optString("wire_type", fallbackMedium);
             into.add(new DeviceInventory.ConnectedDevice(mac,
                     row.optString("hostname", ""), row.optString("ipaddr", ""), medium));
+        }
+    }
+
+    /**
+     * Probe only documented Smart Network/Patrol candidates using read/load verbs.
+     * No insert, update, remove, write, block, or access operation is ever sent.
+     * These forms are candidates for profile/time information, not proof that a
+     * given firmware implements the router UI's Parental Controls feature.
+     */
+    public ParentalControlReport probeParentalControlsReadOnly() {
+        List<ParentalControlEndpointResult> results = new ArrayList<>();
+        Map<String, String> scheduleValues = new LinkedHashMap<>();
+        String stopReason = "";
+        for (ParentalControlProbe.EndpointSpec spec : ParentalControlProbe.candidates()) {
+            try {
+                JSONObject response = apiReadOnlyDiagnostic(spec.form, spec.operation);
+                boolean success = responseSuccess(response);
+                String errorValue = responseErrorValue(response);
+                Object data = response.opt("data");
+                boolean hasData = hasUsefulData(data);
+                ParentalControlProbe.Outcome outcome = ParentalControlProbe.classify(
+                        success, errorValue, hasData);
+                LinkedHashSet<String> fields = new LinkedHashSet<>();
+                collectFieldNames(data, fields, 0);
+                LinkedHashMap<String, String> foundScheduleValues = new LinkedHashMap<>();
+                collectScheduleValues(data, foundScheduleValues, 0);
+                scheduleValues.putAll(foundScheduleValues);
+                String enabledState = "";
+                if ("patrol_enable".equals(spec.form)) enabledState = extractEnabledState(data, 0);
+                results.add(new ParentalControlEndpointResult(spec, outcome,
+                        arrayLength(data), new ArrayList<>(fields),
+                        foundScheduleValues, enabledState, errorValue));
+
+                if (ParentalControlProbe.isSessionFailure(errorValue)) {
+                    sessionInvalid = true;
+                    AuthAttemptGate.markDenied(appContext, new IllegalStateException(errorValue));
+                    stopReason = "أعلن الراوتر أن جلسة الإدارة انتهت أو رُفضت؛ أُوقف الفحص دون إعادة تسجيل الدخول.";
+                    break;
+                }
+            } catch (Exception error) {
+                boolean notFound = isHttpNotFound(error);
+                String safe = diagnosticExceptionLabel(error);
+                results.add(new ParentalControlEndpointResult(spec,
+                        notFound ? ParentalControlProbe.Outcome.UNSUPPORTED
+                                : ParentalControlProbe.Outcome.INCONCLUSIVE,
+                        -1, new ArrayList<>(), new LinkedHashMap<>(), "", safe));
+                stopReason = notFound
+                        ? "المسار admin/smart_network غير موجود على هذا Firmware؛ أُوقف فحص النماذج التابعة له."
+                        : "تعذر إكمال بقية الطلبات بعد خطأ اتصال/استجابة؛ لم تُرسل محاولات إعادة تلقائية.";
+                break;
+            }
+        }
+        return new ParentalControlReport(results, scheduleValues, stopReason, sessionInvalid);
+    }
+
+    private JSONObject apiReadOnlyDiagnostic(String formName, String operation) throws Exception {
+        boolean approved = false;
+        for (ParentalControlProbe.EndpointSpec candidate : ParentalControlProbe.candidates()) {
+            if (candidate.form.equals(formName) && candidate.operation.equals(operation)) {
+                approved = true;
+                break;
+            }
+        }
+        if (!approved || !("read".equals(operation) || "load".equals(operation)))
+            throw new IllegalArgumentException("محاولة تشخيص خارج قائمة القراءة المسموحة");
+        if (sessionInvalid)
+            throw new IllegalStateException("جلسة الراوتر غير موثوقة؛ أُوقف فحص الرقابة الأبوية");
+        String path = "admin/smart_network?form=" + formName;
+        Map<String, String> fields = form("operation", operation);
+        try {
+            return enhancedMode
+                    ? requestEnhanced(path, fields, false)
+                    : requestPlain(path, fields, false, false, false);
+        } catch (Exception error) {
+            if (!isHttpNotFound(error)) {
+                sessionInvalid = true;
+                AuthAttemptGate.markDenied(appContext, error);
+            }
+            throw error;
+        }
+    }
+
+    private static boolean isHttpNotFound(Exception error) {
+        String message = error == null ? "" : error.getMessage();
+        return message != null && message.contains("HTTP 404");
+    }
+
+    private static String diagnosticExceptionLabel(Exception error) {
+        String message = error == null ? "" : error.getMessage();
+        if (message == null) return "خطأ اتصال غير محدد";
+        if (message.contains("HTTP 404")) return "HTTP 404: المسار غير موجود على هذا Firmware";
+        if (message.contains("HTTP 403")) return "HTTP 403: رفض الراوتر الطلب؛ قد تكون الجلسة أو آلية التوقيع غير متوافقة";
+        if (message.contains("HTTP 401")) return "HTTP 401: جلسة الإدارة غير مقبولة";
+        if (message.contains("استجابة HTTP 200 فارغة")) return "استجابة فارغة من الراوتر";
+        if (message.contains("ليس كائن JSON") || message.contains("JSON صالح")) return "استجابة غير متوافقة مع JSON المتوقع";
+        return AuthErrorLabel.safeValue(message);
+    }
+
+    private static boolean responseSuccess(JSONObject response) {
+        Object success = response.opt("success");
+        return Boolean.TRUE.equals(success)
+                || (success instanceof Number && ((Number) success).intValue() == 1);
+    }
+
+    private static String responseErrorValue(JSONObject response) {
+        String[] keys = {"errorcode", "errorCode", "error_code", "error", "msg", "message", "code", "reason"};
+        JSONObject nested = response.optJSONObject("data");
+        for (JSONObject source : new JSONObject[]{nested, response}) {
+            if (source == null) continue;
+            for (String key : keys) {
+                Object value = source.opt(key);
+                if (value instanceof String || value instanceof Number) {
+                    String text = String.valueOf(value).trim();
+                    if (!text.isEmpty() && !"null".equalsIgnoreCase(text))
+                        return AuthErrorLabel.safeValue(text);
+                }
+            }
+        }
+        return "";
+    }
+
+    private static boolean hasUsefulData(Object data) {
+        if (data == null || data == JSONObject.NULL) return false;
+        if (data instanceof JSONObject) return ((JSONObject) data).length() > 0;
+        if (data instanceof JSONArray) return ((JSONArray) data).length() > 0;
+        return !String.valueOf(data).trim().isEmpty();
+    }
+
+    private static int arrayLength(Object data) {
+        return data instanceof JSONArray ? ((JSONArray) data).length() : -1;
+    }
+
+    private static void collectFieldNames(Object value, Set<String> fields, int depth) {
+        if (value == null || depth > 4 || fields.size() >= 30) return;
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            java.util.Iterator<String> iterator = object.keys();
+            while (iterator.hasNext() && fields.size() < 30) {
+                String key = iterator.next();
+                if (key.matches("[A-Za-z0-9_ -]{1,48}")) fields.add(key);
+                collectFieldNames(object.opt(key), fields, depth + 1);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length() && fields.size() < 30; i++)
+                collectFieldNames(array.opt(i), fields, depth + 1);
+        }
+    }
+
+    private static void collectScheduleValues(Object value, Map<String, String> into, int depth) {
+        if (value == null || depth > 5 || into.size() >= 20) return;
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            java.util.Iterator<String> iterator = object.keys();
+            while (iterator.hasNext() && into.size() < 20) {
+                String key = iterator.next();
+                Object child = object.opt(key);
+                if (ParentalControlProbe.isScheduleFieldName(key)) {
+                    String safe = safeScheduleValue(child);
+                    if (!safe.isEmpty()) into.put(key, safe);
+                }
+                collectScheduleValues(child, into, depth + 1);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length() && into.size() < 20; i++)
+                collectScheduleValues(array.opt(i), into, depth + 1);
+        }
+    }
+
+    private static String safeScheduleValue(Object value) {
+        if (value == null || value == JSONObject.NULL) return "";
+        if (value instanceof JSONObject || value instanceof JSONArray) return "";
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty() || text.length() > 80
+                || !text.matches("[A-Za-z0-9_ :,./+-]{1,80}")) return "";
+        return text;
+    }
+
+    private static String extractEnabledState(Object value, int depth) {
+        if (value == null || depth > 4) return "";
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            java.util.Iterator<String> iterator = object.keys();
+            while (iterator.hasNext()) {
+                String key = iterator.next();
+                Object child = object.opt(key);
+                if ("enable".equalsIgnoreCase(key) || "enabled".equalsIgnoreCase(key)
+                        || "patrol_enable".equalsIgnoreCase(key)) {
+                    String raw = String.valueOf(child).trim().toLowerCase(Locale.ROOT);
+                    if ("on".equals(raw) || "true".equals(raw) || "1".equals(raw)) return "مفعّلة";
+                    if ("off".equals(raw) || "false".equals(raw) || "0".equals(raw)) return "معطّلة";
+                }
+                String nested = extractEnabledState(child, depth + 1);
+                if (!nested.isEmpty()) return nested;
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++) {
+                String nested = extractEnabledState(array.opt(i), depth + 1);
+                if (!nested.isEmpty()) return nested;
+            }
+        }
+        return "";
+    }
+
+    public static final class ParentalControlEndpointResult {
+        public final ParentalControlProbe.EndpointSpec spec;
+        public final ParentalControlProbe.Outcome outcome;
+        public final int rowCount;
+        public final List<String> fields;
+        public final Map<String, String> scheduleValues;
+        public final String enabledState;
+        public final String detail;
+
+        ParentalControlEndpointResult(ParentalControlProbe.EndpointSpec spec,
+                ParentalControlProbe.Outcome outcome, int rowCount, List<String> fields,
+                Map<String, String> scheduleValues, String enabledState, String detail) {
+            this.spec = spec;
+            this.outcome = outcome;
+            this.rowCount = rowCount;
+            this.fields = java.util.Collections.unmodifiableList(new ArrayList<>(fields));
+            this.scheduleValues = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(scheduleValues));
+            this.enabledState = enabledState == null ? "" : enabledState;
+            this.detail = detail == null ? "" : detail;
+        }
+    }
+
+    public static final class ParentalControlReport {
+        public final List<ParentalControlEndpointResult> results;
+        public final Map<String, String> scheduleValues;
+        public final String stopReason;
+        public final boolean sessionInvalid;
+        ParentalControlReport(List<ParentalControlEndpointResult> results,
+                Map<String, String> scheduleValues, String stopReason, boolean sessionInvalid) {
+            this.results = java.util.Collections.unmodifiableList(new ArrayList<>(results));
+            this.scheduleValues = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(scheduleValues));
+            this.stopReason = stopReason == null ? "" : stopReason;
+            this.sessionInvalid = sessionInvalid;
+        }
+
+        public String toArabicText() {
+            StringBuilder out = new StringBuilder("تقرير فحص واجهات Smart Network/Patrol المرشحة للرقابة الأبوية — قراءة فقط\n");
+            out.append("المسارات التي فُحصت: ").append(results.size()).append(" من ")
+                    .append(ParentalControlProbe.candidates().size()).append("\n");
+            for (ParentalControlEndpointResult result : results) {
+                out.append("\n• ").append(result.spec.form).append(" / ")
+                        .append(result.spec.operation).append(": ")
+                        .append(ParentalControlProbe.outcomeArabic(result.outcome));
+                if (result.rowCount >= 0) out.append(" — عدد السجلات: ").append(result.rowCount);
+                if (!result.enabledState.isEmpty()) out.append(" — الحالة: ").append(result.enabledState);
+                if (!result.fields.isEmpty()) {
+                    out.append("\n  أسماء الحقول: ");
+                    int limit = Math.min(14, result.fields.size());
+                    for (int i = 0; i < limit; i++) {
+                        if (i > 0) out.append("، ");
+                        out.append(result.fields.get(i));
+                    }
+                    if (result.fields.size() > limit) out.append("، …");
+                }
+                if (!result.scheduleValues.isEmpty()) {
+                    out.append("\n  حقول الوقت/الجدولة: ");
+                    boolean first = true;
+                    for (Map.Entry<String, String> entry : result.scheduleValues.entrySet()) {
+                        if (!first) out.append("؛ ");
+                        out.append(entry.getKey()).append("=").append(entry.getValue());
+                        first = false;
+                    }
+                }
+                if (!result.detail.isEmpty()) out.append("\n  ملاحظة: ").append(result.detail);
+            }
+            if (!scheduleValues.isEmpty()) {
+                out.append("\n\nالنتيجة: عُثر على حقول مرتبطة بالوقت أو الجدولة في رد الراوتر.");
+            } else {
+                out.append("\n\nالنتيجة: لم تُعثر على حقول واضحة للجدولة ضمن هذه الواجهات. هذا لا يثبت غياب الرقابة الأبوية؛ قد تكون الواجهة غير موجودة في هذا Firmware أو تُدار عبر Tether/السحابة.");
+            }
+            if (!stopReason.isEmpty()) out.append("\n\n").append(stopReason);
+            out.append("\n\nحالة الجلسة: ").append(sessionInvalid ? "غير موثوقة؛ يلزم اختبار اتصال جديد" : "لم يظهر فشل جلسة أثناء الفحص");
+            out.append("\n\nتنبيه: هذه واجهات مرشحة من وحدة Smart Network/Patrol وليست واجهة مؤكدة لجداول Parental Controls. لم يُرسل أي طلب كتابة أو حجب أو تعديل.");
+            return out.toString();
+        }
+
+        public String toLogSummary() {
+            int answered = 0;
+            int unsupported = 0;
+            for (ParentalControlEndpointResult result : results) {
+                if (result.outcome == ParentalControlProbe.Outcome.READABLE_WITH_DATA
+                        || result.outcome == ParentalControlProbe.Outcome.READABLE_EMPTY) answered++;
+                if (result.outcome == ParentalControlProbe.Outcome.UNSUPPORTED) unsupported++;
+            }
+            return "فحص قراءة الرقابة الأبوية: استجابت " + answered + " واجهات؛ غير مدعومة "
+                    + unsupported + "؛ حقول جدولة=" + (!scheduleValues.isEmpty());
         }
     }
 
