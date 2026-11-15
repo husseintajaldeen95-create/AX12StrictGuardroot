@@ -31,11 +31,11 @@ public final class GuardService extends Service {
     private static final int MAX_REMOVALS_PER_CYCLE = 1;
     private volatile boolean active = false;
     private static volatile boolean running = false;
+    private volatile boolean explicitStopRequested = false;
     private boolean persistentRestartEnabled = false;
     private Thread worker;
     private GuardLog log;
     private NotificationManager notifier;
-    private int consecutiveFailures = 0;
     private boolean deviceSnapshotWarningLogged = false;
     private boolean notificationPermissionWarningLogged = false;
 
@@ -159,8 +159,8 @@ public final class GuardService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
-    /** Device-list errors are isolated from allow-list protection; unsupported status APIs
-     *  must not stop the existing strict guard. Session/auth failures still fail closed. */
+    /** Device-list errors are isolated from allow-list protection. Invalid admin sessions
+     *  are discarded and recreated by the outer monitor loop; the foreground service stays alive. */
     private void pollDevicePresence(RouterClient client, DevicePresenceTracker tracker,
                                     Set<String> trusted, Set<String> allowed) throws Exception {
         try {
@@ -195,9 +195,10 @@ public final class GuardService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) {
+            explicitStopRequested = true;
             persistentRestartEnabled = false;
             CredentialVault.clear(this);
-            halt();
+            halt(true);
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
@@ -235,7 +236,6 @@ public final class GuardService extends Service {
             return persistent ? START_STICKY : START_NOT_STICKY;
         } catch (Exception e) {
             persistentRestartEnabled = false;
-            CredentialVault.clear(this);
             log.add("تعذر تشغيل/استعادة الحارس: " + safeMessage(e));
             stopForeground(true);
             stopSelf();
@@ -267,107 +267,164 @@ public final class GuardService extends Service {
     }
 
     private void monitor(String host, String password) {
-        RouterClient client = null;
-        String lastResult = "";
         DevicePresenceTracker presenceTracker = new DevicePresenceTracker();
-        try {
-            client = new RouterClient(this, host);
-            client.login(password);
-            log.add("اتصال إدارة ناجح عبر " + client.getProtocolName()
-                    + ". بدء فحص القائمة البيضاء ورصد ظهور الأجهزة واختفائها من قوائم الراوتر.");
-            while (active && !Thread.currentThread().isInterrupted()) {
-                try {
-                    RouterClient.Settings settings = client.readSettings();
-                    if (!settings.enabled) {
-                        log.add("إنذار: Access Control معطّل على الراوتر؛ أوقفت الحارس لتفادي إعادة تفعيل غير آمنة");
-                        update("حماية الراوتر معطّلة. راجع إعدادات Access Control");
-                        break;
-                    }
-                    if (!"white".equalsIgnoreCase(settings.mode)) {
-                        log.add("إنذار: وضع الراوتر ليس White List. لن أغيّره تلقائياً حتى لا أسمح بإضافات ضمنية.");
-                        update("الراوتر ليس على وضع White List");
-                        break;
-                    }
+        String lastResult = "";
+        String safetyPauseReason = "";
+        int consecutiveFailures = 0;
 
-                    Set<String> trusted = new TrustedStore(this).get();
-                    if (trusted.isEmpty()) {
-                        log.add("القائمة اليدوية فارغة، توقفت المراقبة");
-                        break;
-                    }
+        // Keep the foreground service alive while router sessions are renewed. A lost
+        // session is not the same as a user-requested stop.
+        while (active && !Thread.currentThread().isInterrupted()) {
+            RouterClient client = null;
+            long reconnectWait = GuardRecoveryPolicy.SESSION_RECONNECT_MS;
+            try {
+                client = new RouterClient(this, host);
+                client.login(password);
+                consecutiveFailures = 0;
+                log.add("اتصال إدارة ناجح عبر " + client.getProtocolName()
+                        + ". استؤنف فحص القائمة البيضاء ورصد الأجهزة.");
+                update("الحارس متصل بالراوتر ويراقب القائمة البيضاء");
 
-                    final String normalizedHost;
+                while (active && !Thread.currentThread().isInterrupted()) {
                     try {
-                        normalizedHost = MacPolicy.normalizeTrusted(settings.protectedHost);
-                    } catch (IllegalArgumentException invalidHost) {
-                        log.add("إنذار: لم يعلن الراوتر MAC عالمي الإدارة لجهاز الإدارة؛ أوقفت الحارس دون حذف أي عنوان");
-                        update("تعذر اعتماد MAC جهاز الإدارة؛ لم يُحذف أي عنوان");
-                        break;
-                    }
-                    if (!trusted.contains(normalizedHost)) {
-                        log.add("إنذار: MAC جهاز الإدارة المحمي " + normalizedHost + " غير موجود في قائمة الثقة. أضفه يدوياً قبل البدء.");
-                        update("أضف MAC جهاز الإدارة إلى القائمة المعتمدة");
-                        break;
-                    }
-
-                    Set<String> actual = client.readAllowed();
-                    // Presence monitoring is read-only and isolated: an unsupported status endpoint
-                    // does not disable the existing allow-list guard.
-                    pollDevicePresence(client, presenceTracker, trusted, actual);
-                    List<String> unauthorized = MacPolicy.unauthorized(actual, trusted, settings.protectedHost);
-                    if (!unauthorized.isEmpty()) {
-                        log.add("اكتُشف " + unauthorized.size() + " MAC غير مصرح به في Allow List");
-                        int removed = 0;
-                        for (String mac : unauthorized) {
-                            if (!active || removed >= MAX_REMOVALS_PER_CYCLE) break;
-                            client.removeAllowed(mac);
-                            log.add("أزيل من القائمة البيضاء: " + mac);
-                            removed++;
+                        RouterClient.Settings settings = client.readSettings();
+                        if (!settings.enabled) {
+                            if (!"access-control-disabled".equals(safetyPauseReason)) {
+                                log.add("تنبيه: Access Control معطّل من إعدادات الراوتر؛ بقيت خدمة الحارس قيد التشغيل وستعيد الفحص دورياً، لكنها لا تستطيع فرض القائمة البيضاء الآن");
+                                update("الحارس يعمل؛ Access Control معطّل في الراوتر");
+                                safetyPauseReason = "access-control-disabled";
+                            }
+                            pause(60000L);
+                            continue;
                         }
-                        update("أُزيل " + removed + " عنوان غير معتمد من Allow List؛ الحد عنوان واحد في كل دورة");
-                        lastResult = "";
-                    } else if (!"healthy".equals(lastResult)) {
-                        log.add("مراجعة ناجحة: القائمة البيضاء لا تحتوي على MAC غير معتمد");
-                        update("الحماية فعالة؛ القائمة البيضاء مطابقة");
-                        lastResult = "healthy";
+                        if (!"white".equalsIgnoreCase(settings.mode)) {
+                            if (!"not-white-list".equals(safetyPauseReason)) {
+                                log.add("تنبيه: وضع الراوتر ليس White List؛ بقيت الخدمة قيد التشغيل دون تغيير إعداد الراوتر، وستعيد الفحص دورياً");
+                                update("الحارس يعمل؛ الراوتر ليس على وضع White List");
+                                safetyPauseReason = "not-white-list";
+                            }
+                            pause(60000L);
+                            continue;
+                        }
+
+                        Set<String> trusted = new TrustedStore(this).get();
+                        if (trusted.isEmpty()) {
+                            if (!"empty-trust-list".equals(safetyPauseReason)) {
+                                log.add("قائمة الثقة المحلية فارغة؛ بقيت الخدمة قيد التشغيل دون إجراء تغييرات على الراوتر");
+                                update("الحارس ينتظر قائمة ثقة غير فارغة");
+                                safetyPauseReason = "empty-trust-list";
+                            }
+                            pause(60000L);
+                            continue;
+                        }
+
+                        final String normalizedHost;
+                        try {
+                            normalizedHost = MacPolicy.normalizeTrusted(settings.protectedHost);
+                        } catch (IllegalArgumentException invalidHost) {
+                            if (!"invalid-protected-host".equals(safetyPauseReason)) {
+                                log.add("تعذر التحقق من MAC جهاز الإدارة؛ بقيت الخدمة قيد التشغيل ولم تُحذف أي عناوين");
+                                update("الحارس ينتظر التحقق من MAC جهاز الإدارة");
+                                safetyPauseReason = "invalid-protected-host";
+                            }
+                            pause(60000L);
+                            continue;
+                        }
+                        if (!trusted.contains(normalizedHost)) {
+                            if (!"untrusted-protected-host".equals(safetyPauseReason)) {
+                                log.add("MAC جهاز الإدارة المحمي " + normalizedHost
+                                        + " غير موجود في قائمة الثقة؛ بقيت الخدمة قيد التشغيل ولم تُحذف أي عناوين");
+                                update("أضف MAC جهاز الإدارة إلى قائمة الثقة");
+                                safetyPauseReason = "untrusted-protected-host";
+                            }
+                            pause(60000L);
+                            continue;
+                        }
+                        if (!safetyPauseReason.isEmpty()) {
+                            log.add("عادت شروط الحماية المطلوبة؛ استؤنف فحص القائمة البيضاء");
+                            safetyPauseReason = "";
+                        }
+
+                        Set<String> actual = client.readAllowed();
+                        // Presence monitoring is read-only and isolated: an unsupported status endpoint
+                        // does not disable the existing allow-list guard.
+                        pollDevicePresence(client, presenceTracker, trusted, actual);
+                        List<String> unauthorized = MacPolicy.unauthorized(actual, trusted, settings.protectedHost);
+                        if (!unauthorized.isEmpty()) {
+                            log.add("اكتُشف " + unauthorized.size() + " MAC غير مصرح به في Allow List");
+                            int removed = 0;
+                            for (String mac : unauthorized) {
+                                if (!active || removed >= MAX_REMOVALS_PER_CYCLE) break;
+                                client.removeAllowed(mac);
+                                log.add("أزيل من القائمة البيضاء: " + mac);
+                                removed++;
+                            }
+                            update("أُزيل " + removed + " عنوان غير معتمد من Allow List؛ الحد عنوان واحد في كل دورة");
+                            lastResult = "";
+                        } else if (!"healthy".equals(lastResult)) {
+                            log.add("مراجعة ناجحة: القائمة البيضاء لا تحتوي على MAC غير معتمد");
+                            update("الحماية فعالة؛ القائمة البيضاء مطابقة");
+                            lastResult = "healthy";
+                        }
+                        consecutiveFailures = 0;
+                        pause(15000L);
+                    } catch (Exception e) {
+                        String rawMessage = e.getMessage();
+                        String message = safeMessage(e);
+                        log.add("تعذر فحص الحماية: " + message);
+                        update("الحارس مستمر؛ تعذر فحص الراوتر مؤقتاً");
+
+                        if (client.isSessionInvalid() || AuthAttemptPolicy.isDenied(rawMessage)) {
+                            long gateRemaining = AuthAttemptGate.remainingCooldownMs(this);
+                            reconnectWait = GuardRecoveryPolicy.reconnectDelayMs(rawMessage, gateRemaining);
+                            if (AuthAttemptPolicy.isDenied(rawMessage)) {
+                                log.add("يبدو أن الراوتر رفض الجلسة أو استُبدلت بجلسة إدارة أخرى؛ أبقيت خدمة الحارس والإشعار الأمامي فعالين، وأجّلت محاولة الدخول لتجنب تكرار المصادقة. قد لا يسمح Firmware بجلسة متصفح وتطبيق متزامنتين.");
+                                update("الحارس يعمل وينتظر استعادة جلسة الراوتر؛ قد تكون جلسة الإدارة مستخدمة من المتصفح");
+                            } else {
+                                log.add("انتهت جلسة الإدارة أو أصبحت قراءة التوقيع غير موثوقة؛ لم أستخدم الجلسة القديمة مجدداً. ستبقى الخدمة فعالة وستنشئ جلسة جديدة بعد مهلة قصيرة.");
+                                update("الحارس مستمر؛ يعيد إنشاء جلسة الراوتر بعد انقطاع مؤقت");
+                            }
+                            break;
+                        }
+
+                        consecutiveFailures++;
+                        if (consecutiveFailures >= 5) {
+                            reconnectWait = GuardRecoveryPolicy.generalFailureDelayMs(
+                                    AuthAttemptGate.remainingCooldownMs(this));
+                            log.add("تكررت أخطاء الاتصال؛ أبقيت الخدمة فعالة وسأعيد إنشاء جلسة الراوتر بعد مهلة تهدئة");
+                            update("الحارس مستمر؛ ينتظر إعادة الاتصال بالراوتر");
+                            break;
+                        }
+                        pause(Math.min(120000L, 15000L * consecutiveFailures));
                     }
-                    consecutiveFailures = 0;
-                    pause(15000);
-                } catch (Exception e) {
-                    consecutiveFailures++;
-                    String rawMessage = e.getMessage();
-                    String message = safeMessage(e);
-                    log.add("تعذر فحص الحماية: " + message);
-                    update("تعذر التحقق من الراوتر: راجع سجل الأحداث");
-                    if (client.isSessionInvalid()) {
-                        log.add("انتهت موثوقية جلسة الإدارة بعد خطأ قراءة/توقيع. أوقفت المراقبة دون إعادة اتصال أو Logout.");
-                        break;
-                    }
-                    if (AuthAttemptPolicy.isDenied(rawMessage)) {
-                        log.add("رفض الراوتر جلسة الإدارة. أوقفت المراقبة فوراً دون أي إعادة دخول تلقائية.");
-                        break;
-                    }
-                    if (consecutiveFailures >= 5) {
-                        log.add("إيقاف المراقبة بعد 5 أخطاء متتالية لتجنب الإضرار بالراوتر");
-                        break;
-                    }
-                    pause(Math.min(120000, 15000L * consecutiveFailures));
                 }
+            } catch (Exception e) {
+                String rawMessage = e.getMessage();
+                String message = safeMessage(e);
+                long gateRemaining = AuthAttemptGate.remainingCooldownMs(this);
+                reconnectWait = GuardRecoveryPolicy.reconnectDelayMs(rawMessage, gateRemaining);
+                log.add("تعذر إنشاء جلسة الراوتر: " + message
+                        + ". خدمة الحارس لم تتوقف؛ ستُعاد المحاولة بعد مهلة أمان.");
+                update("الحارس يعمل؛ ينتظر إعادة الاتصال الإداري بالراوتر");
+            } finally {
+                if (client != null) client.close();
             }
-        } catch (Exception e) {
-            log.add("فشل الاتصال أو تسجيل الدخول: " + safeMessage(e));
-        } finally {
-            if (client != null) client.close();
-            active = false;
-            running = false;
-            if (persistentRestartEnabled) {
-                CredentialVault.clear(this);
-                persistentRestartEnabled = false;
-                log.add("أُوقفت استعادة المراقبة التلقائية بعد انتهاء جلسة الحارس؛ أدخل كلمة المرور وشغّلها يدوياً بعد معالجة السبب");
-            }
-            log.add("المراقبة متوقفة؛ الراوتر يدير الشبكة حسب إعداداته الحالية");
-            stopForeground(true);
-            stopSelf();
+
+            if (!active || Thread.currentThread().isInterrupted()) break;
+            log.add("خدمة الحارس ما زالت فعالة في الخلفية؛ إعادة محاولة الاتصال بعد نحو "
+                    + Math.max(1L, (reconnectWait + 59999L) / 60000L) + " دقيقة");
+            pause(reconnectWait);
         }
+
+        active = false;
+        running = false;
+        if (explicitStopRequested) {
+            log.add("أُوقفت خدمة الحارس بناءً على طلب المستخدم؛ بقيت إعدادات الراوتر كما هي");
+        } else {
+            log.add("انتهى عامل المراقبة بسبب إنهاء خدمة Android؛ ستُستعاد الخدمة إذا أعاد Android إنشاءها وكان خيار الاستعادة الآمنة مفعلاً");
+        }
+        stopForeground(true);
+        stopSelf();
     }
 
     private static String safeMessage(Exception error) {
@@ -382,14 +439,17 @@ public final class GuardService extends Service {
         catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
     }
 
-    private void halt() {
+    private void halt(boolean userRequested) {
         active = false;
         if (worker != null) worker.interrupt();
-        log.add("أُرسل أمر إيقاف المراقبة");
+        if (userRequested) log.add("أُرسل أمر إيقاف المراقبة من المستخدم");
     }
 
     @Override public void onDestroy() {
-        halt();
+        if (!explicitStopRequested && active) {
+            log.add("أنهى Android خدمة الحارس؛ ستُحاول الاستعادة التلقائية إذا كان الحفظ الآمن مفعلاً ولم يكن التطبيق في حالة إيقاف إجباري");
+        }
+        halt(false);
         super.onDestroy();
     }
 

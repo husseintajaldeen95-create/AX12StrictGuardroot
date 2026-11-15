@@ -84,6 +84,13 @@ public final class AuthAttemptGate {
         return new SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.getDefault()).format(new Date(value));
     }
 
+    /** Remaining local cooldown for a service retry; this never contacts the router. */
+    public static synchronized long remainingCooldownMs(Context context) {
+        if (context == null) return 0L;
+        SharedPreferences p = prefs(context);
+        return AuthAttemptPolicy.remainingMs(System.currentTimeMillis(), p.getLong(RETRY_AFTER, 0L));
+    }
+
     /** This status requires no network access and never sends a password. */
     public static synchronized String status(Context context) {
         SharedPreferences p = prefs(context);
