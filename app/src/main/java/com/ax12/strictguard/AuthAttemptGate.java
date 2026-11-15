@@ -65,9 +65,8 @@ public final class AuthAttemptGate {
     private static void record(Context context, Exception error) {
         String message = error == null ? null : error.getMessage();
         long now = System.currentTimeMillis();
-        long localWait = AuthAttemptPolicy.cooldownMs(message);
+        long duration = AuthAttemptPolicy.effectiveCooldownMs(message);
         long serverWaitSeconds = AuthAttemptPolicy.serverRetrySecondsFromError(message);
-        long duration = Math.max(localWait, serverWaitSeconds > 0 ? serverWaitSeconds * 1000L : 0L);
         SharedPreferences current = prefs(context);
         long previous = current.getLong(RETRY_AFTER, 0L);
         SharedPreferences.Editor edit = current.edit().putLong(RETRY_AFTER, Math.max(previous, now + duration));

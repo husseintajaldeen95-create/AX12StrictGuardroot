@@ -5,7 +5,7 @@ import java.util.Locale;
 /** Pure Java safety policy for local router authentication attempts. */
 public final class AuthAttemptPolicy {
     private AuthAttemptPolicy() {}
-    public static final long DENIED_COOLDOWN_MS = 30L * 60L * 1000L;
+    public static final long DENIED_COOLDOWN_MS = 10L * 60L * 1000L;
     public static final long OTHER_FAILURE_COOLDOWN_MS = 2L * 60L * 1000L;
 
     public static boolean isDenied(String message) {
@@ -19,8 +19,17 @@ public final class AuthAttemptPolicy {
                 || value.contains("locked out");
     }
 
+    /** Local safety delay only; it does not represent the router's own lockout. */
     public static long cooldownMs(String message) {
         return isDenied(message) ? DENIED_COOLDOWN_MS : OTHER_FAILURE_COOLDOWN_MS;
+    }
+
+    /** Preserve a longer server-provided Retry-After when the router actually supplies one. */
+    public static long effectiveCooldownMs(String message) {
+        long local = cooldownMs(message);
+        long serverSeconds = serverRetrySecondsFromError(message);
+        long serverMs = serverSeconds > 0L ? serverSeconds * 1000L : 0L;
+        return Math.max(local, serverMs);
     }
 
     /** A Retry-After header is useful only if the router actually supplies it. */

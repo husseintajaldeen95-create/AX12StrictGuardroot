@@ -78,6 +78,15 @@ public final class TrustedStore {
         save(copy);
     }
 
+    /** Replace the local source-of-truth list after a verified router reconciliation. */
+    public synchronized void replaceAll(java.util.Collection<String> macs) {
+        if (macs == null) throw new IllegalArgumentException("قائمة الثقة مفقودة");
+        Set<String> validated = MacPolicy.canonicalTrusted(macs);
+        if (validated.size() > 128)
+            throw new IllegalArgumentException("القائمة كبيرة على نحو غير متوقع");
+        save(new LinkedHashSet<>(validated));
+    }
+
     public synchronized void setHost(String host) {
         prefs.edit().putString("router_host", host).apply();
     }

@@ -674,6 +674,113 @@ public final class RouterClient {
         throw new IllegalStateException("هذا الجهاز لم يره الراوتر بعد؛ أضف MAC من واجهة الإدارة الرسمية");
     }
 
+
+    /**
+     * Apply an explicitly selected trust list to the router allow-list.
+     * Access Control must already be enabled in White List mode. No other
+     * router feature is changed. All additions are preflighted before writes;
+     * additions happen before removals to reduce the chance of disconnecting
+     * an approved device if an addition cannot be completed.
+     */
+    public Map<String, String> synchronizeAllowList(Set<String> desiredAddresses,
+                                                     String expectedProtectedHost) throws Exception {
+        if (desiredAddresses == null)
+            throw new IllegalArgumentException("قائمة الأجهزة المحددة مفقودة");
+        Set<String> desired = MacPolicy.canonicalTrusted(desiredAddresses);
+        if (desired.isEmpty())
+            throw new IllegalArgumentException("لا يمكن تطبيق قائمة سماح فارغة");
+
+        Settings settings = readSettings();
+        if (!settings.enabled)
+            throw new IllegalStateException("Access Control غير مفعّل في الراوتر. فعّله يدوياً من واجهة الراوتر قبل المزامنة؛ لن يغيّره التطبيق.");
+        if (!"white".equalsIgnoreCase(settings.mode))
+            throw new IllegalStateException("الراوتر ليس في وضع White List. غيّر الوضع يدوياً قبل المزامنة؛ لن يغيّره التطبيق.");
+
+        String protectedHost = MacPolicy.normalizeTrusted(settings.protectedHost);
+        String expected = MacPolicy.normalizeTrusted(expectedProtectedHost);
+        if (!protectedHost.equals(expected))
+            throw new IllegalStateException("تغير MAC جهاز إدارة الراوتر منذ آخر قراءة؛ أعد تحديث المقارنة قبل المزامنة.");
+        if (!desired.contains(protectedHost))
+            throw new IllegalArgumentException("يجب إبقاء MAC جهاز إدارة الراوتر محدداً.");
+
+        Map<String, String> beforeMap = readAllowedWithNames();
+        AllowListSyncPlan plan = AllowListSyncPlan.create(desired, beforeMap.keySet(), protectedHost);
+
+        // Preflight every required addition before making the first router write.
+        if (!plan.toAdd.isEmpty()) {
+            List<JSONObject> observed = rows(api("white_devices", "load", formEmpty()));
+            Set<String> observedMacs = new LinkedHashSet<>();
+            for (JSONObject row : observed) observedMacs.add(rowMac(row));
+            Set<String> unavailable = new LinkedHashSet<>(plan.toAdd);
+            unavailable.removeAll(observedMacs);
+            if (!unavailable.isEmpty()) {
+                throw new IllegalStateException("لا يعرض الراوتر الأجهزة التالية ضمن قائمة الأجهزة القابلة للإضافة؛ لم تُجرَ أي كتابة: "
+                        + joinMacs(unavailable));
+            }
+        }
+
+        // Add selected devices first. Reload the observed list for each add so
+        // that the index is always based on the router's current response.
+        for (String target : plan.toAdd) {
+            List<JSONObject> observed = rows(api("white_devices", "load", formEmpty()));
+            boolean found = false;
+            for (int i = 0; i < observed.size(); i++) {
+                JSONObject row = observed.get(i);
+                if (target.equals(rowMac(row))) {
+                    Map<String, String> body = form("data", row.toString());
+                    body.put("index", Integer.toString(i));
+                    api("white_devices", "access", body);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                throw new IllegalStateException("اختفى الجهاز " + target + " من قائمة الأجهزة القابلة للإضافة أثناء المزامنة؛ توقفت العملية.");
+            if (!readAllowed().contains(target))
+                throw new IllegalStateException("لم يؤكد الراوتر إضافة " + target + " إلى قائمة السماح؛ توقفت العملية قبل حذف أي جهاز آخر.");
+        }
+
+        Set<String> afterAdds = readAllowed();
+        if (!afterAdds.containsAll(desired))
+            throw new IllegalStateException("لم تكتمل إضافات الأجهزة المحددة؛ لم تبدأ إزالة الأجهزة القديمة.");
+
+        // Only after all selected devices are confirmed present, remove entries
+        // that the user left unchecked. The protected router-management MAC is
+        // explicitly excluded by the validated plan.
+        for (String target : plan.toRemove) {
+            if (target.equals(protectedHost))
+                throw new IllegalStateException("حماية إضافية: رُفضت محاولة إزالة MAC جهاز إدارة الراوتر.");
+            removeAllowed(target);
+        }
+
+        Set<String> finalAllowed = readAllowed();
+        if (!finalAllowed.equals(desired)) {
+            Set<String> missing = new LinkedHashSet<>(desired);
+            missing.removeAll(finalAllowed);
+            Set<String> extra = new LinkedHashSet<>(finalAllowed);
+            extra.removeAll(desired);
+            throw new IllegalStateException("لم تتطابق قائمة الراوتر مع الاختيارات بعد التنفيذ. الناقص: "
+                    + joinMacs(missing) + "؛ الزائد: " + joinMacs(extra)
+                    + ". لم يعلن التطبيق نجاح المزامنة؛ حدّث المقارنة قبل إعادة المحاولة.");
+        }
+        return readAllowedWithNames();
+    }
+
+    private static String joinMacs(Set<String> macs) {
+        if (macs == null || macs.isEmpty()) return "لا يوجد";
+        StringBuilder out = new StringBuilder();
+        int count = 0;
+        for (String mac : macs) {
+            if (count++ > 0) out.append("، ");
+            out.append(mac);
+            if (count >= 8 && macs.size() > count) {
+                out.append("، …");
+                break;
+            }
+        }
+        return out.toString();
+    }
+
     private void clearSession() {
         sessionInvalid = false;
         token = null;

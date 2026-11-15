@@ -1,4 +1,4 @@
-# AX12StrictGuardroot — 0.1.7-strict-mac-secure-restart
+# AX12StrictGuardroot — 0.1.9-trust-selection-sync
 
 Latest source update: reject locally administered/private/randomized MAC addresses from trust and allow-list write paths. Optional Android Keystore-backed AES-GCM credential storage enables sticky-service recovery after Android recreates the service. Credential persistence is opt-in and cleared when monitoring stops or ends. See `SECURE_RESTART_AND_MAC_POLICY_AR.md` and `PROJECT_STATUS.md`.
 
