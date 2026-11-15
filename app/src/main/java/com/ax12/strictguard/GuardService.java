@@ -276,7 +276,7 @@ public final class GuardService extends Service {
         // session is not the same as a user-requested stop.
         while (active && !Thread.currentThread().isInterrupted()) {
             RouterClient client = null;
-            long reconnectWait = GuardRecoveryPolicy.SESSION_RECONNECT_MS;
+            long reconnectWait = GuardRecoveryPolicy.SESSION_TIMEOUT_RECONNECT_MS;
             try {
                 client = new RouterClient(this, host);
                 client.login(password);
