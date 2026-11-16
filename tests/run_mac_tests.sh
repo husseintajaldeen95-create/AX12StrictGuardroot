@@ -7,6 +7,7 @@ javac -encoding UTF-8 -d "$OUT" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/MacPolicy.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/AllowListSyncPlan.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/DeviceInventory.java" \
+  "$ROOT/app/src/main/java/com/ax12/strictguard/DeviceControlStatus.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/DevicePresenceTracker.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/RouterUrl.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/AuthAttemptPolicy.java" \
@@ -16,6 +17,7 @@ javac -encoding UTF-8 -d "$OUT" \
   "$ROOT/tests/MacPolicyTest.java" \
   "$ROOT/tests/AllowListSyncPlanTest.java" \
   "$ROOT/tests/DeviceInventoryTest.java" \
+  "$ROOT/tests/DeviceControlStatusTest.java" \
   "$ROOT/tests/DevicePresenceTrackerTest.java" \
   "$ROOT/tests/RouterUrlTest.java" \
   "$ROOT/tests/AuthAttemptPolicyTest.java" \
@@ -25,6 +27,7 @@ javac -encoding UTF-8 -d "$OUT" \
 java -cp "$OUT" MacPolicyTest
 java -cp "$OUT" AllowListSyncPlanTest
 java -cp "$OUT" DeviceInventoryTest
+java -cp "$OUT" DeviceControlStatusTest
 java -cp "$OUT" DevicePresenceTrackerTest
 java -cp "$OUT" RouterUrlTest
 
@@ -32,3 +35,4 @@ java -cp "$OUT" AuthAttemptPolicyTest
 java -cp "$OUT" GuardRecoveryPolicyTest
 java -cp "$OUT" AuthErrorLabelTest
 java -cp "$OUT" ParentalControlProbeTest
+sh "$ROOT/tests/check_ui_structure.sh"

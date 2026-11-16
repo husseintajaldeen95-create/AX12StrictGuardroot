@@ -1,3 +1,11 @@
+## Update 0.2.4-device-diagnostics — 2026-11-16
+
+- Added read-only per-device Patrol diagnostic using `patrol_devices/load` and `patrol_owner_list/load`.
+- Associates records with MAC only when an explicit MAC is returned.
+- Displays profile name, owner_id, recognized schedule fields, and router-recorded `internet_blocked` state. Missing evidence remains Unknown.
+- Does not test end-device Internet reachability and performs no router writes.
+- Pure Java test suite passes; Android APK build and live AX12 firmware validation remain pending via GitHub Actions and the user's router.
+
 # حالة المشروع — AX12 Strict Guard 0.2.3-parental-probe
 
 - تاريخ العمل: 2026-11-16.

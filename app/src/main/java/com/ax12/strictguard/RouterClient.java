@@ -770,6 +770,99 @@ public final class RouterClient {
         return new ParentalControlReport(results, scheduleValues, stopReason, sessionInvalid);
     }
 
+    /**
+     * Read-only per-device Patrol evidence. This is deliberately reported as
+     * router-recorded state, not proof of end-to-end Internet reachability.
+     */
+    public Map<String, DeviceControlStatus> readDeviceControlStatusesReadOnly() throws Exception {
+        LinkedHashMap<String, DeviceControlStatus> result = new LinkedHashMap<>();
+        JSONObject devicesResponse = apiReadOnlyDiagnostic("patrol_devices", "load");
+        if (!responseSuccess(devicesResponse))
+            throw new IllegalStateException("رفض الراوتر قراءة patrol_devices: " + AuthErrorLabel.safeValue(responseErrorValue(devicesResponse)));
+        JSONObject ownersResponse = apiReadOnlyDiagnostic("patrol_owner_list", "load");
+        if (!responseSuccess(ownersResponse))
+            throw new IllegalStateException("رفض الراوتر قراءة patrol_owner_list: " + AuthErrorLabel.safeValue(responseErrorValue(ownersResponse)));
+        collectDeviceControlRows(devicesResponse.opt("data"), result, 0);
+        collectDeviceControlRows(ownersResponse.opt("data"), result, 0);
+        return java.util.Collections.unmodifiableMap(result);
+    }
+
+    private static void collectDeviceControlRows(Object value,
+            Map<String, DeviceControlStatus> into, int depth) {
+        if (value == null || depth > 7 || into.size() >= 500) return;
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++)
+                collectDeviceControlRows(array.opt(i), into, depth + 1);
+            return;
+        }
+        if (!(value instanceof JSONObject)) return;
+        JSONObject row = (JSONObject) value;
+        String mac = firstString(row, "mac", "macaddr", "mac_address", "client_mac");
+        if (!mac.isEmpty()) {
+            try {
+                String normalized = MacPolicy.normalize(mac);
+                String profile = firstString(row, "profile_name", "owner_name", "name", "profile");
+                String owner = firstString(row, "owner_id", "ownerId");
+                Boolean blocked = firstBoolean(row, "internet_blocked", "internetBlocked", "blocked");
+                String schedule = extractDeviceSchedule(row);
+                DeviceControlStatus previous = into.get(normalized);
+                if (previous != null) {
+                    if (profile.isEmpty()) profile = previous.profileName;
+                    if (owner.isEmpty()) owner = previous.ownerId;
+                    if (blocked == null) blocked = previous.internetBlocked;
+                    if (schedule.isEmpty()) schedule = previous.scheduleSummary;
+                }
+                into.put(normalized, new DeviceControlStatus(normalized, profile, owner, blocked, schedule));
+            } catch (IllegalArgumentException ignored) {
+                // Ignore malformed MAC records; never associate them with a device.
+            }
+        }
+        java.util.Iterator<String> keys = row.keys();
+        while (keys.hasNext()) collectDeviceControlRows(row.opt(keys.next()), into, depth + 1);
+    }
+
+    private static String firstString(JSONObject row, String... keys) {
+        for (String key : keys) {
+            Object value = row.opt(key);
+            if (value != null && value != JSONObject.NULL && !(value instanceof JSONObject)
+                    && !(value instanceof JSONArray)) {
+                String text = String.valueOf(value).trim();
+                if (!text.isEmpty() && !"null".equalsIgnoreCase(text)) return text;
+            }
+        }
+        return "";
+    }
+
+    private static Boolean firstBoolean(JSONObject row, String... keys) {
+        for (String key : keys) {
+            Object value = row.opt(key);
+            if (value instanceof Boolean) return (Boolean) value;
+            if (value instanceof Number) return ((Number) value).intValue() != 0;
+            if (value != null && value != JSONObject.NULL) {
+                String text = String.valueOf(value).trim().toLowerCase(Locale.ROOT);
+                if ("1".equals(text) || "true".equals(text) || "on".equals(text)) return true;
+                if ("0".equals(text) || "false".equals(text) || "off".equals(text)) return false;
+            }
+        }
+        return null;
+    }
+
+    private static String extractDeviceSchedule(JSONObject row) {
+        StringBuilder out = new StringBuilder();
+        java.util.Iterator<String> keys = row.keys();
+        while (keys.hasNext() && out.length() < 180) {
+            String key = keys.next();
+            if (!ParentalControlProbe.isScheduleFieldName(key)) continue;
+            String value = safeScheduleValue(row.opt(key));
+            if (!value.isEmpty()) {
+                if (out.length() > 0) out.append(" | ");
+                out.append(key).append("=").append(value);
+            }
+        }
+        return out.toString();
+    }
+
     private JSONObject apiReadOnlyDiagnostic(String formName, String operation) throws Exception {
         boolean approved = false;
         for (ParentalControlProbe.EndpointSpec candidate : ParentalControlProbe.candidates()) {

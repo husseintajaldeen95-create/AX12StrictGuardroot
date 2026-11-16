@@ -11,6 +11,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -25,6 +26,8 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.FrameLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import java.util.Set;
 import java.util.Map;
@@ -42,10 +45,16 @@ public final class MainActivity extends Activity {
     private final Handler ui=new Handler(Looper.getMainLooper());
     private EditText hostField,passwordField,macField;
     private CheckBox persistCredentialsCheck;
-    private TextView trustedView,eventsView,statusView,authStateView,inventorySummaryView,inventoryMetaView,parentalProbeView;
+    private TextView trustedView,eventsView,statusView,authStateView,inventorySummaryView,inventoryMetaView,parentalProbeView,deviceControlMetaView;
     private String lastParentalProbeReport = "";
     private LinearLayout inventoryRows;
     private TextView selectionMetaView;
+    private FrameLayout pageHost;
+    private View[] pages;
+    private TextView[] navItems;
+    private TextView dashboardGuardView, dashboardRouterView, dashboardSummaryView;
+    private LinearLayout dashboardChart;
+    private int activeTab = 0;
     private Button applySelectionButton;
     private TrustedStore store;
     private GuardLog log;
@@ -56,6 +65,8 @@ public final class MainActivity extends Activity {
     private boolean modifyingRouter=false;
     private Map<String, String> lastRouterAllowed;
     private List<DeviceInventory.ConnectedDevice> lastConnected;
+    private Map<String, DeviceControlStatus> lastDeviceControlStatuses = new LinkedHashMap<>();
+    private long lastDeviceControlReadTime;
     private boolean lastSnapshotComplete;
     private String lastSnapshotHost;
     private long lastSnapshotTime;
@@ -84,63 +95,316 @@ public final class MainActivity extends Activity {
     private Button button(String label,Runnable run){Button b=new Button(this);b.setText(label);b.setAllCaps(false);b.setOnClickListener(v->run.run());return b;}
     private EditText field(String hint,int input){EditText f=new EditText(this);f.setHint(hint);f.setSingleLine(true);f.setTextDirection(View.TEXT_DIRECTION_LTR);f.setInputType(input);return f;}
     private void showUi(){
-        ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setPadding(20,20,20,25);col.setOrientation(LinearLayout.VERTICAL);
-        col.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);scroll.addView(col);
-        TextView title=text("AX12 STRICT GUARD",24,true); title.setTextColor(Color.rgb(18,94,122)); col.addView(title);
-        col.addView(text("إدارة قائمة السماح ورصد الأجهزة – 0.2.3",14,false));
-        col.addView(text("لا يُضاف أي MAC تلقائياً إلى قائمة الثقة. عند تشغيل الحارس تُراجع قائمة الراوتر كل 15 ثانية وتُزال الإدخالات غير المعتمدة.",14,false));
-        col.addView(text("أثناء عمل الحارس، يرصد التطبيق ظهور الأجهزة واختفاءها من قائمة المتصلين ويرسل إشعارات بذلك بعد تأكيد التغيير في قراءتين كاملتين متتاليتين. القراءة الأولى خط أساس ولا تُصدر إشعارات للأجهزة الموجودة مسبقاً. هذه الميزة للقراءة فقط ولا تغيّر إعدادات الراوتر.",13,false));
-        col.addView(text("تُرفض عناوين MAC المحلية الإدارة (Private/Randomized) من قائمة الثقة. قبول MAC عالمي الإدارة لا يثبت أنه أصلي ولا يمنع انتحاله. لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص. لا تشغّل الحارس قبل نجاح اختبار القراءة فقط.",13,true));
-        col.addView(text("عنوان الراوتر المحلي",16,true));
-        hostField=field("192.168.0.1",InputType.TYPE_CLASS_PHONE);hostField.setText(store.getHost());col.addView(hostField);
-        col.addView(text("كلمة مرور إدارة الراوتر",16,true));
-        passwordField=field("كلمة مرور الإدارة",InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD); col.addView(passwordField);
-        persistCredentialsCheck = new CheckBox(this);
-        persistCredentialsCheck.setText("استعادة الحارس تلقائياً بعد إنهاء Android لخدمة التطبيق. تُحفظ كلمة مرور الإدارة مشفرة في Android Keystore، وتبقى محفوظة عند انتهاء جلسة الراوتر لإعادة الاتصال؛ تُحذف عند إيقاف الحارس صراحة أو حذفها يدوياً.");
-        persistCredentialsCheck.setChecked(CredentialVault.hasSavedCredential(this));
-        col.addView(persistCredentialsCheck);
-        col.addView(text("لأفضل استمرارية: اجعل استخدام البطارية للتطبيق غير مقيّد، واسمح بالتشغيل التلقائي إن توفر، ولا تستخدم Force Stop. إذا كان Firmware يسمح بجلسة إدارة واحدة فقد يؤدي تسجيل الدخول من Chrome إلى إبطال جلسة التطبيق مؤقتاً.", 13, false));
-        col.addView(button("فتح إعدادات التطبيق والبطارية", this::openAppSettings));
-        col.addView(button("حذف كلمة المرور المشفرة المحفوظة", this::clearSavedCredential));
-        col.addView(button("فحص بروتوكول الراوتر دون تسجيل الدخول",this::probeCompatibility));
-        col.addView(button("1. اختبار الاتصال (قراءة فقط)",this::testConnection));
-        col.addView(button("فحص دعم الرقابة الأبوية والجداول (قراءة فقط)",this::probeParentalControls));
-        parentalProbeView=text("لم يُجرَ فحص واجهات الرقابة الأبوية بعد. أوقف المراقبة، اختبر الاتصال أولاً، ثم نفّذ الفحص.",13,false);
-        col.addView(parentalProbeView);
-        col.addView(button("نسخ تقرير فحص الرقابة الأبوية",this::copyParentalProbeReport));
-        col.addView(text("حالة المصادقة: المهلة المعروضة للتطبيق فقط، ولا تؤكد زمن الحظر في الراوتر.",13,true));
-        authStateView=text("",13,false);col.addView(authStateView);
-        col.addView(button("عرض وقت آخر رفض ومهلة التطبيق دون اتصال بالراوتر",this::showAuthStatus));
-        col.addView(text("أضف عناوين MAC المعتمدة يدوياً",16,true));
-        macField=field("AA:BB:CC:DD:EE:FF",InputType.TYPE_CLASS_TEXT);col.addView(macField);
-        col.addView(button("إضافة MAC للقائمة المعتمدة محلياً",this::addMac));
-        col.addView(button("حذف MAC من القائمة المعتمدة محلياً",this::removeMac));
-        col.addView(button("نسخ قائمة الثقة للاحتفاظ بها قبل إعادة تثبيت APK",this::copyTrustedList));
-        col.addView(button("استيراد قائمة MAC محفوظة من نص",this::importTrustedList));
-        col.addView(button("إرسال MAC معتمد إلى الراوتر (بموافقة صريحة)",this::confirmAllow));
-        trustedView=text("",15,false);col.addView(trustedView);
-        col.addView(text("مقارنة قائمة السماح بالأجهزة المتصلة",19,true));
-        col.addView(text("تعرض هذه القائمة عناوين السماح في الراوتر والأجهزة التي رصدها متصلة واعتمادها في التطبيق. حدد الأجهزة المسموح لها، ثم اضغط زر تطبيق التحديدات بعد مراجعة الملخص. لا تعني قائمة السماح أن الجهاز متصل، ويجب أن يكون Access Control مفعلاً في وضع White List.",13,false));
-        col.addView(button("تحديث مقارنة الأجهزة (قراءة فقط)",this::refreshInventory));
-        inventoryMetaView=text("لم يتم جلب بيانات الراوتر بعد. نفّذ اختبار الاتصال أولاً ثم اضغط تحديث المقارنة.",13,false);
-        col.addView(inventoryMetaView);
-        inventorySummaryView=text("",15,true);col.addView(inventorySummaryView);
-        inventoryRows=new LinearLayout(this);inventoryRows.setOrientation(LinearLayout.VERTICAL);
-        col.addView(inventoryRows);
-        selectionMetaView=text("بعد تحديث المقارنة، حدد الأجهزة المسموح لها ثم طبّق الاختيارات على الراوتر.",13,false);
-        col.addView(selectionMetaView);
-        applySelectionButton=button("تطبيق التحديدات على قائمة سماح الراوتر",this::applySelectionToRouter);
-        applySelectionButton.setEnabled(false);
-        col.addView(applySelectionButton);
-        col.addView(button("التراجع عن التحديدات غير المحفوظة",this::discardSelectionChanges));
-        col.addView(text("التحديد لا يغيّر الراوتر فوراً. زر التطبيق ينفذ المزامنة بعد تأكيدك، ويضيف الأجهزة المحددة أولاً ثم يزيل غير المحددة، مع حماية MAC جهاز الإدارة.",12,false));
-        col.addView(button("2. تشغيل المراقبة الصارمة",this::startGuard));
-        col.addView(button("إيقاف المراقبة",this::stopGuard));
-        statusView=text("الحالة: غير متصلة",14,true);col.addView(statusView);
-        col.addView(text("سجل أحداث الحماية واتصال الأجهزة",17,true));
-        eventsView=text("",13,false);col.addView(eventsView);
-        setContentView(scroll);updateLists();
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        root.setBackgroundColor(Color.rgb(245, 248, 252));
+
+        pageHost = new FrameLayout(this);
+        LinearLayout.LayoutParams hostParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+        root.addView(pageHost, hostParams);
+
+        ScrollView dashboard = createScrollPage();
+        ScrollView devices = createScrollPage();
+        ScrollView protection = createScrollPage();
+        ScrollView settings = createScrollPage();
+        pages = new View[]{dashboard, devices, protection, settings};
+        buildDashboardPage(pageContent(dashboard));
+        buildDevicesPage(pageContent(devices));
+        buildProtectionPage(pageContent(protection));
+        buildSettingsPage(pageContent(settings));
+        for (View page : pages) {
+            pageHost.addView(page, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            page.setVisibility(View.GONE);
+        }
+
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setOrientation(LinearLayout.HORIZONTAL);
+        navigation.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        navigation.setGravity(Gravity.CENTER);
+        navigation.setPadding(5, 5, 5, 7);
+        navigation.setBackgroundColor(Color.WHITE);
+        GradientDrawable navBg = new GradientDrawable();
+        navBg.setColor(Color.WHITE);
+        navBg.setStroke(1, Color.rgb(225, 232, 239));
+        navigation.setBackground(navBg);
+        String[] labels = {"⌂\nالرئيسية", "▦\nالأجهزة", "◈\nالحماية", "⚙\nالإعدادات"};
+        navItems = new TextView[4];
+        for (int i = 0; i < labels.length; i++) {
+            final int tab = i;
+            TextView item = new TextView(this);
+            item.setText(labels[i]);
+            item.setGravity(Gravity.CENTER);
+            item.setTextSize(12);
+            item.setTypeface(null, Typeface.BOLD);
+            item.setPadding(2, 7, 2, 7);
+            item.setClickable(true);
+            item.setFocusable(true);
+            item.setOnClickListener(v -> selectTab(tab));
+            navItems[i] = item;
+            navigation.addView(item, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        }
+        root.addView(navigation, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        setContentView(root);
+        selectTab(0);
+        updateLists();
+        renderInventory();
+        updateDashboard();
     }
+
+    private ScrollView createScrollPage() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        content.setPadding(18, 17, 18, 24);
+        scroll.addView(content, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        return scroll;
+    }
+
+    private LinearLayout pageContent(ScrollView page) {
+        return (LinearLayout) page.getChildAt(0);
+    }
+
+    private void selectTab(int tab) {
+        if (pages == null || navItems == null) return;
+        activeTab = tab;
+        for (int i = 0; i < pages.length; i++) {
+            pages[i].setVisibility(i == tab ? View.VISIBLE : View.GONE);
+            navItems[i].setTextColor(i == tab ? Color.rgb(15, 112, 151) : Color.rgb(105, 119, 133));
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(i == tab ? Color.rgb(231, 244, 250) : Color.TRANSPARENT);
+            bg.setCornerRadius(18);
+            navItems[i].setBackground(bg);
+        }
+    }
+
+    private void pageHeader(LinearLayout parent, String title, String subtitle) {
+        TextView heading = text(title, 23, true);
+        heading.setTextColor(Color.rgb(20, 91, 121));
+        parent.addView(heading);
+        TextView sub = text(subtitle, 13, false);
+        sub.setTextColor(Color.rgb(105, 119, 133));
+        parent.addView(sub);
+        addGap(parent, 8);
+    }
+
+    private LinearLayout addCard(LinearLayout parent) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        card.setPadding(15, 12, 15, 12);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(Color.WHITE);
+        shape.setCornerRadius(18);
+        shape.setStroke(1, Color.rgb(226, 233, 239));
+        card.setBackground(shape);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, 5, 0, 10);
+        parent.addView(card, params);
+        return card;
+    }
+
+    private void addGap(LinearLayout parent, int height) {
+        View gap = new View(this);
+        parent.addView(gap, new LinearLayout.LayoutParams(1, height));
+    }
+
+    private void buildDashboardPage(LinearLayout col) {
+        pageHeader(col, "AX12 STRICT GUARD", "مركز إدارة الشبكة والحماية");
+        LinearLayout hero = addCard(col);
+        TextView heroTitle = text("مركز مراقبة الشبكة", 18, true);
+        heroTitle.setTextColor(Color.rgb(20, 91, 121));
+        hero.addView(heroTitle);
+        dashboardRouterView = text("حالة الراوتر: لم يُجرَ اختبار القراءة بعد", 13, true);
+        hero.addView(dashboardRouterView);
+        dashboardGuardView = text("الحارس الصارم: غير نشط", 13, true);
+        hero.addView(dashboardGuardView);
+        hero.addView(text("تعرض المؤشرات آخر بيانات قرأها التطبيق. لا تُعد هذه الأرقام قياساً آنياً ما لم يُجرَ تحديث ناجح.", 12, false));
+
+        LinearLayout stats = addCard(col);
+        stats.addView(text("ملخص الأجهزة", 17, true));
+        dashboardSummaryView = text("لم تُقرأ بيانات الأجهزة بعد.", 13, false);
+        stats.addView(dashboardSummaryView);
+
+        LinearLayout chartCard = addCard(col);
+        chartCard.addView(text("مؤشرات الشبكة", 17, true));
+        dashboardChart = new LinearLayout(this);
+        dashboardChart.setOrientation(LinearLayout.VERTICAL);
+        chartCard.addView(dashboardChart);
+
+        LinearLayout quick = addCard(col);
+        quick.addView(text("الوصول السريع", 17, true));
+        quick.addView(button("إدارة الأجهزة وقائمة الثقة", () -> selectTab(1)));
+        quick.addView(button("الحماية والرقابة الأبوية", () -> selectTab(2)));
+        quick.addView(button("إعداد الراوتر واختبار الاتصال", () -> selectTab(3)));
+        quick.addView(button("تحديث مقارنة الأجهزة", this::refreshInventory));
+        quick.addView(button("تشخيص الإنترنت والرقابة لكل جهاز", this::refreshDeviceControlDiagnostics));
+    }
+
+    private void buildDevicesPage(LinearLayout col) {
+        pageHeader(col, "إدارة الأجهزة", "قائمة الثقة والأجهزة المرصودة ومزامنة السماح");
+        LinearLayout trusted = addCard(col);
+        trusted.addView(text("قائمة الثقة المحلية", 17, true));
+        trusted.addView(text("لا يُضاف أي MAC تلقائياً. تُقبل عناوين MAC العالمية الإدارة فقط، وتُرفض العناوين المحلية الإدارة (Private/Randomized).", 12, false));
+        macField=field("AA:BB:CC:DD:EE:FF",InputType.TYPE_CLASS_TEXT);trusted.addView(macField);
+        trusted.addView(button("إضافة MAC للقائمة المعتمدة محلياً",this::addMac));
+        trusted.addView(button("حذف MAC من القائمة المعتمدة محلياً",this::removeMac));
+        trusted.addView(button("نسخ قائمة الثقة للاحتفاظ بها",this::copyTrustedList));
+        trusted.addView(button("استيراد قائمة MAC محفوظة من نص",this::importTrustedList));
+        trusted.addView(button("إرسال MAC معتمد إلى الراوتر (بموافقة صريحة)",this::confirmAllow));
+        trustedView=text("",14,false);trusted.addView(trustedView);
+
+        LinearLayout inventory = addCard(col);
+        inventory.addView(text("مقارنة قائمة السماح بالأجهزة المتصلة",18,true));
+        inventory.addView(text("تُعرض حالة قائمة السماح في الراوتر، والظهور في آخر قراءة، والاعتماد المحلي. هذه لقطة وقت القراءة وليست مراقبة آنية.",12,false));
+        inventory.addView(button("تحديث مقارنة الأجهزة (قراءة فقط)",this::refreshInventory));
+        inventoryMetaView=text("لم يتم جلب بيانات الراوتر بعد. نفّذ اختبار الاتصال أولاً.",12,false);
+        inventory.addView(inventoryMetaView);
+        inventorySummaryView=text("",13,true);inventory.addView(inventorySummaryView);
+        inventoryRows=new LinearLayout(this);inventoryRows.setOrientation(LinearLayout.VERTICAL);
+        inventory.addView(inventoryRows);
+        selectionMetaView=text("بعد تحديث المقارنة، حدد الأجهزة المسموح لها ثم طبّق الاختيارات.",12,false);
+        inventory.addView(selectionMetaView);
+        applySelectionButton=button("تطبيق التحديدات على قائمة سماح الراوتر",this::applySelectionToRouter);
+        applySelectionButton.setEnabled(false);inventory.addView(applySelectionButton);
+        inventory.addView(button("التراجع عن التحديدات غير المحفوظة",this::discardSelectionChanges));
+        inventory.addView(text("لا تتغير إعدادات Wi-Fi أو DHCP أو Blacklist أو الرقابة الأبوية عند مزامنة Allow List.",11,false));
+    }
+
+    private void buildProtectionPage(LinearLayout col) {
+        pageHeader(col, "مركز الحماية", "المراقبة الصارمة وتشخيص الرقابة الأبوية وسجل الأحداث");
+        LinearLayout guard = addCard(col);
+        guard.addView(text("الحارس الصارم",18,true));
+        guard.addView(text("يراجع الحارس قائمة السماح دورياً ويرصد ظهور الأجهزة واختفاءها. لا يمكن منع أول اتصال إذا سمح الراوتر به قبل الفحص، ولا يثبت MAC وحده هوية الجهاز.",12,false));
+        guard.addView(button("تشغيل المراقبة الصارمة",this::startGuard));
+        guard.addView(button("إيقاف المراقبة",this::stopGuard));
+        statusView=text("الحالة: غير متصلة",14,true);guard.addView(statusView);
+        authStateView=text("",12,false);guard.addView(authStateView);
+        guard.addView(button("عرض وقت آخر رفض ومهلة التطبيق",this::showAuthStatus));
+
+        LinearLayout parental = addCard(col);
+        parental.addView(text("تشخيص الرقابة الأبوية",18,true));
+        parental.addView(text("قراءة ملف Profile والجدول وحقول حجب الإنترنت التي يعيدها Firmware. البيانات المفقودة تُعرض كغير معروفة، ولا يُستنتج منها أن الإنترنت يعمل أو محجوب.",12,false));
+        parental.addView(button("فحص دعم الرقابة الأبوية والجداول (قراءة فقط)",this::probeParentalControls));
+        parentalProbeView=text("لم يُجرَ فحص واجهات الرقابة الأبوية بعد. أوقف المراقبة واختبر الاتصال أولاً.",12,false);
+        parental.addView(parentalProbeView);
+        parental.addView(button("نسخ تقرير فحص الرقابة الأبوية",this::copyParentalProbeReport));
+        parental.addView(button("تشخيص الإنترنت والرقابة الأبوية لكل جهاز",this::refreshDeviceControlDiagnostics));
+        deviceControlMetaView=text("لم يُجرَ تشخيص ملفات الرقابة لكل جهاز بعد. يتطلب نجاح اختبار الاتصال أولاً.",12,false);
+        parental.addView(deviceControlMetaView);
+
+        LinearLayout events = addCard(col);
+        events.addView(text("سجل أحداث الحماية والاتصالات",17,true));
+        eventsView=text("",12,false);events.addView(eventsView);
+    }
+
+    private void buildSettingsPage(LinearLayout col) {
+        pageHeader(col, "إعدادات التطبيق والراوتر", "إعداد الاتصال والمصادقة والاستمرارية");
+        LinearLayout router = addCard(col);
+        router.addView(text("الاتصال بالراوتر",18,true));
+        router.addView(text("عنوان الراوتر المحلي",14,true));
+        hostField=field("192.168.0.1",InputType.TYPE_CLASS_PHONE);hostField.setText(store.getHost());router.addView(hostField);
+        router.addView(text("كلمة مرور إدارة الراوتر",14,true));
+        passwordField=field("كلمة مرور الإدارة",InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);router.addView(passwordField);
+        router.addView(button("فحص بروتوكول الراوتر دون تسجيل الدخول",this::probeCompatibility));
+        router.addView(button("اختبار الاتصال (قراءة فقط)",this::testConnection));
+        router.addView(text("يجب نجاح اختبار القراءة فقط بنفس عنوان الراوتر وكلمة المرور قبل تحديث المقارنة أو أي تعديل أو تشغيل للمراقبة.",12,false));
+
+        LinearLayout persistence = addCard(col);
+        persistence.addView(text("استمرارية الحارس",18,true));
+        persistCredentialsCheck = new CheckBox(this);
+        persistCredentialsCheck.setText("استعادة الحارس تلقائياً بعد إنهاء Android لخدمة التطبيق. تُحفظ كلمة المرور مشفرة في Android Keystore، وتُحذف عند إيقاف الحارس صراحة أو حذفها يدوياً.");
+        persistCredentialsCheck.setChecked(CredentialVault.hasSavedCredential(this));
+        persistence.addView(persistCredentialsCheck);
+        persistence.addView(text("لأفضل استمرارية: اجعل استخدام البطارية غير مقيّد، واسمح بالتشغيل التلقائي إن توفر، ولا تستخدم Force Stop. قد يؤدي تسجيل الدخول من Chrome إلى إبطال جلسة التطبيق إذا كان Firmware يسمح بجلسة إدارة واحدة.",12,false));
+        persistence.addView(button("فتح إعدادات التطبيق والبطارية", this::openAppSettings));
+        persistence.addView(button("حذف كلمة المرور المشفرة المحفوظة", this::clearSavedCredential));
+    }
+
+    private void addDashboardBar(String label, int value, int max, int color) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, 6, 0, 6);
+        TextView name = text(label, 12, false);
+        name.setWidth(dp(112));
+        row.addView(name);
+        ProgressBar track = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        track.setMax(Math.max(1, max));
+        track.setProgress(Math.max(0, Math.min(value, Math.max(1, max))));
+        track.setProgressTintList(ColorStateList.valueOf(color));
+        track.setProgressBackgroundTintList(ColorStateList.valueOf(Color.rgb(235, 240, 245)));
+        LinearLayout.LayoutParams trackParams = new LinearLayout.LayoutParams(0, dp(9), 1f);
+        trackParams.setMargins(5, 0, 5, 0);
+        row.addView(track, trackParams);
+        TextView number = text(String.valueOf(value), 12, true);
+        number.setGravity(Gravity.CENTER);
+        number.setWidth(dp(34));
+        row.addView(number);
+        dashboardChart.addView(row);
+    }
+
+    private int dp(int value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private void updateDashboard() {
+        if (dashboardGuardView == null || dashboardRouterView == null || dashboardSummaryView == null
+                || dashboardChart == null || store == null) return;
+        boolean running = GuardService.isRunning();
+        dashboardGuardView.setText("الحارس الصارم: " + (running ? "يعمل" : "متوقف"));
+        dashboardGuardView.setTextColor(running ? Color.rgb(34, 132, 83) : Color.rgb(105, 119, 133));
+        dashboardRouterView.setText(routerReadTestPassed
+                ? "حالة الراوتر: نجح آخر اختبار قراءة فقط"
+                : "حالة الراوتر: لم يتم تأكيد الاتصال باختبار قراءة ناجح");
+        int trusted = store.getValid().size();
+        if (lastConnected == null || lastRouterAllowed == null) {
+            dashboardSummaryView.setText("الأجهزة المتصلة: غير متاح | قائمة السماح: غير متاحة\nالأجهزة المعتمدة محلياً: " + trusted
+                    + "\nنفّذ اختبار الاتصال ثم حدّث مقارنة الأجهزة للحصول على إحصائيات فعلية.");
+            dashboardChart.removeAllViews();
+            dashboardChart.addView(text("لا توجد لقطة أجهزة بعد. ستظهر الرسوم بعد قراءة ناجحة من الراوتر.", 12, false));
+            return;
+        }
+        DeviceInventory.Report report = DeviceInventory.compare(lastRouterAllowed, lastConnected, store.getValid());
+        int connected = report.connectedCount;
+        int allowed = report.allowedCount;
+        int outside = report.connectedOutsideAllowCount;
+        int blocked = 0;
+        int knownInternet = 0;
+        for (DeviceControlStatus status : lastDeviceControlStatuses.values()) {
+            if (status.internetBlocked != null) {
+                knownInternet++;
+                if (status.internetBlocked) blocked++;
+            }
+        }
+        dashboardSummaryView.setText("الأجهزة التي ظهرت في آخر قراءة: " + connected
+                + " | قائمة سماح الراوتر: " + allowed
+                + "\nالاعتماد المحلي: " + trusted
+                + " | متصل خارج السماح: " + outside
+                + "\nسجلات الرقابة ذات حالة إنترنت معروفة: " + knownInternet
+                + (lastDeviceControlReadTime > 0 ? " | محجوب حسب سجل الراوتر: " + blocked : " | تشخيص الإنترنت: لم يُنفذ بعد"));
+        dashboardChart.removeAllViews();
+        int max = Math.max(1, Math.max(Math.max(connected, allowed), Math.max(trusted, outside)));
+        addDashboardBar("ظهر متصلاً", connected, max, Color.rgb(35, 139, 177));
+        addDashboardBar("سماح الراوتر", allowed, max, Color.rgb(64, 155, 112));
+        addDashboardBar("ثقة التطبيق", trusted, max, Color.rgb(111, 117, 194));
+        addDashboardBar("خارج السماح", outside, max, Color.rgb(213, 125, 78));
+        if (lastDeviceControlReadTime > 0) {
+            int internetMax = Math.max(1, lastDeviceControlStatuses.size());
+            addDashboardBar("محجوب حسب السجل", blocked, internetMax, Color.rgb(191, 91, 91));
+        }
+        dashboardChart.addView(text("ملاحظة: (محجوب حسب السجل) يعكس حقلاً أعاده الراوتر فقط، وليس اختباراً مستقلاً لوصول الإنترنت.", 11, false));
+    }
+
     private void updateLists(){
         try {
             List<String> stored = store.getStoredForReview();
@@ -160,6 +424,7 @@ public final class MainActivity extends Activity {
         eventsView.setText(log.text());
         if (authStateView != null) authStateView.setText(AuthAttemptGate.status(this));
         updateSelectionControls();
+        updateDashboard();
     }
     private void copyTrustedList() {
         Set<String> macs = new java.util.LinkedHashSet<>(store.getStoredForReview());
@@ -417,6 +682,46 @@ public final class MainActivity extends Activity {
         } catch (Exception e) {error(e.getMessage());}
     }
 
+    /** Reads router-recorded per-device parental-control evidence; no router writes. */
+    private void refreshDeviceControlDiagnostics() {
+        try {
+            if (GuardService.isRunning() || testingConnection || probingCompatibility || loadingInventory || modifyingRouter || selectionBusy)
+                throw new IllegalStateException("أوقف المراقبة والفحوص أو التعديلات الجارية قبل التشخيص؛ الراوتر قد يسمح بجلسة إدارة واحدة فقط");
+            requirePassword();
+            String host = routerHost(), password = passwordField.getText().toString();
+            requireSuccessfulReadTest(host, password);
+            loadingInventory = true;
+            deviceControlMetaView.setText("جارٍ قراءة بيانات Patrol للأجهزة والملفات — قراءة فقط، دون تغيير أي إعداد...");
+            new Thread(() -> {
+                RouterClient client = null;
+                try {
+                    client = new RouterClient(this, host);
+                    client.login(password);
+                    Map<String, DeviceControlStatus> statuses = client.readDeviceControlStatusesReadOnly();
+                    ui.post(() -> {
+                        lastDeviceControlStatuses = new LinkedHashMap<>(statuses);
+                        lastDeviceControlReadTime = System.currentTimeMillis();
+                        renderInventory();
+                        String time = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault())
+                                .format(new Date(lastDeviceControlReadTime));
+                        deviceControlMetaView.setText("آخر تشخيص: " + time + " | سجلات أجهزة مرتبطة بـ MAC: " + statuses.size()
+                                + "\nالحالة المعروضة هي ما سجله الراوتر؛ عدم وجود حقل لا يعني أن الإنترنت يعمل أو أنه محجوب.");
+                        log.add("اكتمل تشخيص Patrol للقراءة فقط؛ سجلات الأجهزة المرتبطة بـ MAC=" + statuses.size());
+                    });
+                } catch (Exception error) {
+                    String type = error.getClass().getSimpleName();
+                    ui.post(() -> {
+                        deviceControlMetaView.setText("تعذر جلب تشخيص الرقابة لكل جهاز (" + type + "). لم تتغير إعدادات الراوتر؛ راجع توافق Firmware وسجل الأحداث.");
+                        log.add("تعذر تشخيص حالة الرقابة لكل جهاز؛ نوع الخطأ: " + type);
+                    });
+                } finally {
+                    if (client != null) client.close();
+                    ui.post(() -> { loadingInventory = false; updateSelectionControls(); });
+                }
+            }, "AX12-DeviceControlReadOnly").start();
+        } catch (Exception error) { error(error.getMessage()); }
+    }
+
     private void renderInventory() {
         if (inventoryRows==null || inventorySummaryView==null || inventoryMetaView==null) return;
         inventoryRows.removeAllViews();
@@ -446,15 +751,44 @@ public final class MainActivity extends Activity {
                 inventoryRows.addView(text("لم يرجع الراوتر أي MAC في السماح أو قائمة الاتصال، والقائمة المحلية فارغة.",14,false));
             }
             boolean protectedHostShown = false;
+            java.util.Set<String> shownMacs = new java.util.LinkedHashSet<>();
             for (DeviceInventory.Entry entry: report.entries) {
                 showInventoryEntry(entry);
+                shownMacs.add(entry.mac);
                 if (isProtectedHost(entry.mac)) protectedHostShown = true;
+            }
+            for (DeviceControlStatus control : lastDeviceControlStatuses.values()) {
+                if (!shownMacs.contains(control.mac)) showControlOnlyEntry(control);
             }
             if (!protectedHostShown) showProtectedHostEntry();
             updateSelectionControls();
+            updateDashboard();
         } catch (Exception ignored) {
             inventorySummaryView.setText("تعذر مقارنة البيانات بعد تغيير القائمة المحلية.");
         }
+    }
+
+    private void showControlOnlyEntry(DeviceControlStatus control) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        card.setPadding(15, 11, 15, 11);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(Color.rgb(255, 248, 225));
+        shape.setCornerRadius(14);
+        shape.setStroke(1, Color.rgb(219, 227, 231));
+        card.setBackground(shape);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, 6, 0, 8);
+        inventoryRows.addView(card, params);
+        card.addView(text("سجل رقابة غير ظاهر في لقطة العملاء | " + control.mac, 14, true));
+        card.addView(text("ملف الرقابة: " + (control.profileName.isEmpty() ? "غير محدد" : control.profileName)
+                + " | Profile ID: " + (control.ownerId.isEmpty() ? "غير متاح" : control.ownerId), 12, false));
+        card.addView(text("حالة الإنترنت وفق سجل الراوتر: " + control.internetStateArabic(), 12, true));
+        if (!control.scheduleSummary.isEmpty())
+            card.addView(text("بيانات الجدول: " + control.scheduleSummary, 11, false));
+        card.addView(text("هذا السجل لم يرتبط بقائمة العملاء الحالية؛ لا نستنتج منه أن الجهاز متصل الآن.", 11, false));
     }
 
     private void showInventoryEntry(DeviceInventory.Entry d) {
@@ -490,6 +824,18 @@ public final class MainActivity extends Activity {
             card.addView(text("تنبيه: هذا MAC مسموح في الراوتر لكنه غير محدد في قائمة التطبيق؛ سيُزال عند تطبيق الاختيارات.",12,true));
         else if (selected && !d.allowedByRouter)
             card.addView(text("هذا MAC محدد في التطبيق لكنه غير مدرج حالياً في قائمة سماح الراوتر؛ سيُضاف إذا أتاحه Firmware.",12,false));
+        DeviceControlStatus control = lastDeviceControlStatuses.get(d.mac);
+        if (lastDeviceControlReadTime == 0) {
+            card.addView(text("الرقابة الأبوية: لم يُجرَ فحص بيانات Patrol بعد.",12,false));
+        } else if (control == null) {
+            card.addView(text("الرقابة الأبوية: لم يُرجع الراوتر سجلاً مرتبطاً بهذا MAC؛ حالة الحجب غير معروفة.",12,false));
+        } else {
+            card.addView(text("ملف الرقابة: " + (control.profileName.isEmpty() ? "غير محدد" : control.profileName)
+                    + " | Profile ID: " + (control.ownerId.isEmpty() ? "غير متاح" : control.ownerId),12,false));
+            card.addView(text("حالة الإنترنت وفق سجل الراوتر: " + control.internetStateArabic(),12,true));
+            if (!control.scheduleSummary.isEmpty())
+                card.addView(text("بيانات الجدول التي أعادها الراوتر: " + control.scheduleSummary,11,false));
+        }
         if (d.locallyAdministered)
             card.addView(text("مرفوض للاعتماد: هذا MAC محلي الإدارة (Private/Randomized محتمل). لا يمكن إثبات أصالة MAC العالمي من العنوان وحده.",12,true));
 
