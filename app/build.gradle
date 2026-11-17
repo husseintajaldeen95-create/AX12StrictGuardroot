@@ -7,8 +7,8 @@ android {
         applicationId 'com.ax12.strictguard'
         minSdk 26
         targetSdk 32
-        versionCode 19
-        versionName '0.2.7-live-network-status'
+        versionCode 20
+        versionName '0.2.7.1-live-network-status-fix'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

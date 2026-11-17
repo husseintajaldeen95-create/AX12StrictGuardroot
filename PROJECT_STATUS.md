@@ -1,7 +1,7 @@
-# حالة المشروع — AX12 Strict Guard 0.2.7-live-network-status
+# حالة المشروع — AX12 Strict Guard 0.2.7.1-live-network-status-fix
 
 - الإصدار السابق: 0.2.6.1-traffic-field-diagnostics (versionCode 18).
-- الإصدار الحالي في المصدر: 0.2.7-live-network-status (versionCode 19).
+- الإصدار الحالي في المصدر: 0.2.7.1-live-network-status-fix (versionCode 20).
 - العتاد المستهدف: TP-Link Archer AX12 V1.0؛ Firmware 1.5.3 Build 20261008 Rel. 56884(4555).
 
 ## التغيير المعتمد

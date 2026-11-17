@@ -1,4 +1,4 @@
-# AX12StrictGuardroot — 0.2.7-live-network-status
+# AX12StrictGuardroot — 0.2.7.1-live-network-status-fix
 
 Latest source update: adds a manual read-only diagnostic for four candidate Smart Network/Patrol forms (`patrol_enable`, `patrol_limit`, `patrol_devices`, and `patrol_owner_list`). The app reports whether each endpoint responds and whether schedule-related fields are returned. It sends only `read`/`load` operations and does not modify Parental Controls or any router setting. These candidate forms are not yet verified against the user's firmware; see `PARENTAL_CONTROL_DIAGNOSTIC_AR.md`, `PROJECT_STATUS.md`, and `CHANGELOG_AR.md`.
 
