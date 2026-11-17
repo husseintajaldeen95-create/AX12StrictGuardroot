@@ -14,8 +14,8 @@ javac -encoding UTF-8 -d "$OUT" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/GuardRecoveryPolicy.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/AuthErrorLabel.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/ParentalControlProbe.java" \
-  "$ROOT/app/src/main/java/com/ax12/strictguard/TrafficRateMath.java" \
   "$ROOT/app/src/main/java/com/ax12/strictguard/TrafficFieldNames.java" \
+  "$ROOT/app/src/main/java/com/ax12/strictguard/LiveTrafficStatus.java" \
   "$ROOT/tests/MacPolicyTest.java" \
   "$ROOT/tests/AllowListSyncPlanTest.java" \
   "$ROOT/tests/DeviceInventoryTest.java" \
@@ -26,8 +26,8 @@ javac -encoding UTF-8 -d "$OUT" \
   "$ROOT/tests/GuardRecoveryPolicyTest.java" \
   "$ROOT/tests/AuthErrorLabelTest.java" \
   "$ROOT/tests/ParentalControlProbeTest.java" \
-  "$ROOT/tests/TrafficRateMathTest.java" \
-  "$ROOT/tests/TrafficFieldNamesTest.java"
+  "$ROOT/tests/TrafficFieldNamesTest.java" \
+  "$ROOT/tests/LiveTrafficStatusTest.java"
 java -cp "$OUT" MacPolicyTest
 java -cp "$OUT" AllowListSyncPlanTest
 java -cp "$OUT" DeviceInventoryTest
@@ -39,6 +39,6 @@ java -cp "$OUT" AuthAttemptPolicyTest
 java -cp "$OUT" GuardRecoveryPolicyTest
 java -cp "$OUT" AuthErrorLabelTest
 java -cp "$OUT" ParentalControlProbeTest
-java -cp "$OUT" TrafficRateMathTest
 java -cp "$OUT" TrafficFieldNamesTest
+java -cp "$OUT" LiveTrafficStatusTest
 sh "$ROOT/tests/check_ui_structure.sh"

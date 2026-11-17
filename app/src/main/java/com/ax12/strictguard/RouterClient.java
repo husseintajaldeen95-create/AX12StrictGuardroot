@@ -900,7 +900,7 @@ public final class RouterClient {
         final String formName = "device_priority";
         final String operation = "load";
         if (sessionInvalid)
-            throw new IllegalStateException("جلسة الراوتر غير موثوقة؛ أُوقف فحص استهلاك البيانات");
+            throw new IllegalStateException("جلسة الراوتر غير موثوقة؛ أُوقف فحص نشاط البيانات");
         Map<String, String> fields = form("operation", operation);
         JSONObject response;
         try {

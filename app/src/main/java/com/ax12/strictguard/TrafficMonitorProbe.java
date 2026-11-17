@@ -8,16 +8,10 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /** Read-only parser for the Archer AX12 Smart Network device-priority table. */
 public final class TrafficMonitorProbe {
-    private static final Pattern RATE_WITH_UNIT = Pattern.compile(
-            "([-+]?[0-9]+(?:\\.[0-9]+)?)\\s*(mb/s|mbyte/s|mbps|kb/s|kbyte/s|kbps|b/s|byte/s|bps)",
-            Pattern.CASE_INSENSITIVE);
     private static final String[] MAC_KEYS = {"mac", "macaddr", "mac_address", "client_mac", "host_mac"};
     private static final String[] NAME_KEYS = {"name", "hostname", "device_name", "client_name", "alias", "dev_name"};
     private static final String[] DOWN_KEYS = {"download_rate", "down_rate", "downstream_rate", "rx_rate",
@@ -32,22 +26,23 @@ public final class TrafficMonitorProbe {
     public static final class Sample {
         public final String mac;
         public final String name;
-        public final double downloadBytesPerSecond;
-        public final double uploadBytesPerSecond;
-        public final boolean hasRates;
+        /** Raw firmware values. Their unit is deliberately not inferred. */
+        public final double rawDownload;
+        public final double rawUpload;
+        public final boolean hasRawRates;
 
-        Sample(String mac, String name, double download, double upload, boolean hasRates) {
+        Sample(String mac, String name, double download, double upload, boolean hasRawRates) {
             this.mac = mac;
             this.name = name == null ? "" : name;
-            this.downloadBytesPerSecond = download;
-            this.uploadBytesPerSecond = upload;
-            this.hasRates = hasRates;
+            this.rawDownload = download;
+            this.rawUpload = upload;
+            this.hasRawRates = hasRawRates;
         }
     }
 
     public static final class Result {
         public final boolean endpointAnswered;
-        public final boolean hasRates;
+        public final boolean hasRawRates;
         public final List<Sample> samples;
         public final String report;
 
@@ -55,8 +50,8 @@ public final class TrafficMonitorProbe {
             this.endpointAnswered = answered;
             this.samples = Collections.unmodifiableList(new ArrayList<>(samples));
             boolean found = false;
-            for (Sample sample : samples) if (sample.hasRates) { found = true; break; }
-            this.hasRates = found;
+            for (Sample sample : samples) if (sample.hasRawRates) { found = true; break; }
+            this.hasRawRates = found;
             this.report = report;
         }
     }
@@ -95,16 +90,16 @@ public final class TrafficMonitorProbe {
             try { normalized = MacPolicy.normalize(mac); }
             catch (Exception invalid) { continue; }
             String name = value(row, NAME_KEYS);
-            double down = readRate(row, DOWN_KEYS);
-            double up = readRate(row, UP_KEYS);
-            boolean hasRates = Double.isFinite(down) && Double.isFinite(up);
+            double down = readRawNumber(row, DOWN_KEYS);
+            double up = readRawNumber(row, UP_KEYS);
+            boolean hasRates = Double.isFinite(down) && Double.isFinite(up) && down >= 0 && up >= 0;
             if (hasRates) rateCount++;
             samples.add(new Sample(normalized, name, down, up, hasRates));
         }
         StringBuilder report = new StringBuilder();
         report.append("نجحت قراءة واجهة admin/smart_network?form=device_priority (load).")
                 .append("\nسجلات MAC القابلة للربط: ").append(samples.size())
-                .append("\nسجلات تحتوي سرعتي تنزيل ورفع بوحدات قابلة للتحويل: ").append(rateCount)
+                .append("\nسجلات تحتوي قيمتي تنزيل ورفع رقميتين: ").append(rateCount)
                 .append("\nأسماء الحقول المستلمة: ");
         int count = 0;
         for (String field : fields) {
@@ -113,20 +108,19 @@ public final class TrafficMonitorProbe {
             if (count >= 45) { report.append(", …"); break; }
         }
         if (rateCount == 0) {
-            report.append("\nلم أتعرف بعد على سرعتي التنزيل والرفع بوحدات صريحة؛ لن أحوّل قيماً مجهولة الوحدة إلى أرقام استهلاك.");
-            report.append("\nعينات القيم الخام لأول ثلاثة سجلات (للتشخيص فقط، دون افتراض وحدة):");
+            report.append("\nلم تظهر قيم رقمية صالحة لحقلي التنزيل والرفع في السجلات.");
+            report.append("\nعينات القيم الخام لأول ثلاثة سجلات (للتشخيص فقط):");
             for (int i = 0; i < samples.size() && i < 3; i++) {
                 Sample sample = samples.get(i);
                 JSONObject row = findRowByMac(rows, sample.mac);
                 if (row == null) continue;
                 report.append("\n").append(maskedMac(sample.mac)).append(" | ")
                         .append(rawFieldDiagnostic(row, "downloadSpeed", "download_speed", "download_rate"))
-                        .append(" | ").append(rawFieldDiagnostic(row, "uploadSpeed", "upload_speed", "upload_rate"))
-                        .append(" | ").append(rawFieldDiagnostic(row, "trafficUsage", "traffic_usage"));
+                        .append(" | ").append(rawFieldDiagnostic(row, "uploadSpeed", "upload_speed", "upload_rate"));
             }
-            report.append("\nأرسل التقرير بعد إجراء تنزيل ورفع تجريبيين على جهاز واحد؛ ستساعد مقارنة القيم قبل/أثناء النقل على تحديد طبيعة الحقول، دون تخمين وحداتها.");
+            report.append("\nلا توجد قراءة نشاط قابلة للاستخدام بعد؛ لم يتم تغيير أي إعداد.");
         } else {
-            report.append("\nتم التعرف على معدلات الرفع والتنزيل بوحدات صريحة؛ يمكن بدء الجمع التراكمي المحلي عند تشغيل الحارس.");
+            report.append("\nتم التعرف على القيم الرقمية الخام للرفع والتنزيل. ستُستخدم فقط لمعرفة وجود نشاط (قيمة أكبر من صفر)، دون افتراض وحدة أو عرض سرعة رقمية.");
         }
         report.append("\nالعملية قراءة فقط؛ لم يتم تفعيل QoS أو تغيير أولوية أي جهاز.");
         return new Result(true, samples, report.toString());
@@ -201,14 +195,24 @@ public final class TrafficMonitorProbe {
         return "";
     }
 
-    private static double readRate(JSONObject row, String[] aliases) {
+    private static double readRawNumber(JSONObject row, String[] aliases) {
         for (String alias : aliases) {
             Iterator<String> keys = row.keys();
             while (keys.hasNext()) {
                 String key = keys.next();
                 if (!TrafficFieldNames.matches(key, alias)) continue;
-                double parsed = parseRate(row.opt(key), key);
-                if (Double.isFinite(parsed)) return parsed;
+                Object value = row.opt(key);
+                if (value instanceof Number) {
+                    double number = ((Number) value).doubleValue();
+                    return Double.isFinite(number) && number >= 0 ? number : Double.NaN;
+                }
+                if (value instanceof String) {
+                    String raw = ((String) value).trim();
+                    try {
+                        double number = Double.parseDouble(raw);
+                        return Double.isFinite(number) && number >= 0 ? number : Double.NaN;
+                    } catch (NumberFormatException ignored) { return Double.NaN; }
+                }
             }
         }
         return Double.NaN;
@@ -238,34 +242,4 @@ public final class TrafficMonitorProbe {
         return mac.substring(0, 8) + "-**-**-**";
     }
 
-    /** Convert only explicit rate units. Bare numbers are intentionally not guessed. */
-    private static double parseRate(Object value, String key) {
-        if (value == null || value == JSONObject.NULL) return Double.NaN;
-        String raw = String.valueOf(value).trim().toLowerCase(Locale.ROOT).replace(",", "");
-        Matcher matcher = RATE_WITH_UNIT.matcher(raw);
-        if (matcher.find()) {
-            double amount;
-            try { amount = Double.parseDouble(matcher.group(1)); }
-            catch (NumberFormatException bad) { return Double.NaN; }
-            String unit = matcher.group(2).toLowerCase(Locale.ROOT);
-            if (unit.equals("mb/s") || unit.equals("mbyte/s")) return amount * 1024d * 1024d;
-            if (unit.equals("kb/s") || unit.equals("kbyte/s")) return amount * 1024d;
-            if (unit.equals("b/s") || unit.equals("byte/s")) return amount;
-            if (unit.equals("mbps")) return amount * 1000d * 1000d / 8d;
-            if (unit.equals("kbps")) return amount * 1000d / 8d;
-            if (unit.equals("bps")) return amount / 8d;
-        }
-        if (!(value instanceof Number)) return Double.NaN;
-        double amount = ((Number) value).doubleValue();
-        if (!Double.isFinite(amount) || amount < 0) return Double.NaN;
-        String normalized = key.toLowerCase(Locale.ROOT);
-        if (normalized.endsWith("_bytes_per_second") || normalized.endsWith("_bytes_sec")
-                || normalized.endsWith("_byte_s") || normalized.endsWith("_bps_bytes")) return amount;
-        if (normalized.endsWith("_kb_s") || normalized.endsWith("_kbytes_sec")) return amount * 1024d;
-        if (normalized.endsWith("_mb_s") || normalized.endsWith("_mbytes_sec")) return amount * 1024d * 1024d;
-        if (normalized.endsWith("_kbps")) return amount * 1000d / 8d;
-        if (normalized.endsWith("_mbps")) return amount * 1000000d / 8d;
-        if (normalized.endsWith("_bps")) return amount / 8d;
-        return Double.NaN;
-    }
 }

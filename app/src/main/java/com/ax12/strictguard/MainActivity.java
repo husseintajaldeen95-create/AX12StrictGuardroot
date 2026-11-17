@@ -56,8 +56,7 @@ public final class MainActivity extends Activity {
     private LinearLayout dashboardChart;
     private TextView trafficMetaView, trafficSummaryView;
     private LinearLayout trafficRows;
-    private String trafficProbeReport = "لم يُجرَ فحص استهلاك البيانات بعد.";
-    private int trafficPeriodDays = 1;
+    private String trafficProbeReport = "لم يُجرَ فحص نشاط البيانات بعد.";
     private boolean trafficProbeBusy = false;
     private int activeTab = 0;
     private Button applySelectionButton;
@@ -269,32 +268,17 @@ public final class MainActivity extends Activity {
         trustedView=text("",14,false);trusted.addView(trustedView);
 
         LinearLayout traffic = addCard(col);
-        traffic.addView(text("مراقبة استهلاك البيانات", 18, true));
-        traffic.addView(text("قراءة السرعة الآنية لكل جهاز، ثم تجميع تقديري يومي وأسبوعي وشهري من العينات الفعلية. قد تتطلب واجهة Device Priority تفعيل QoS يدوياً في الراوتر؛ التطبيق لن يفعّله أو يغيّر أولوية الأجهزة تلقائياً.", 12, false));
-        traffic.addView(button("فحص مصدر الاستهلاك من الراوتر (قراءة فقط)", this::probeTrafficMonitor));
-        trafficMetaView = text("لم يُفحص مصدر بيانات السرعة بعد. أوقف الحارس مؤقتاً قبل الفحص حتى لا تتعارض جلسات الإدارة.", 12, false);
+        traffic.addView(text("حالة الاتصال ونشاط الإنترنت الآن", 18, true));
+        traffic.addView(text("عرض مختصر فقط: هل الجهاز ظاهر ضمن الأجهزة المتصلة؟ وهل توجد حركة تنزيل أو رفع في آخر قراءة؟ لا تُعرض إجماليات أو إحصائيات يومية أو شهرية، ولا تُفترض وحدة للسرعات الخام.", 12, false));
+        traffic.addView(button("فحص مصدر مراقبة النشاط (قراءة فقط)", this::probeTrafficMonitor));
+        trafficMetaView = text("لم يُفحص مصدر نشاط الأجهزة بعد. أوقف الحارس مؤقتاً لإجراء الفحص الأولي؛ بعد نجاحه شغّل الحارس للتحديث التلقائي.", 12, false);
         traffic.addView(trafficMetaView);
-        trafficSummaryView = text("لا توجد قراءات استهلاك محفوظة بعد.", 13, true);
+        trafficSummaryView = text("حالة المراقبة: لم تبدأ بعد.", 13, true);
         traffic.addView(trafficSummaryView);
-        LinearLayout periods = new LinearLayout(this);
-        periods.setOrientation(LinearLayout.HORIZONTAL);
-        periods.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        Button today = button("اليوم", () -> { trafficPeriodDays = 1; renderTrafficUsage(); });
-        Button week = button("7 أيام", () -> { trafficPeriodDays = 7; renderTrafficUsage(); });
-        Button month = button("30 يوماً", () -> { trafficPeriodDays = 30; renderTrafficUsage(); });
-        periods.addView(today, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        periods.addView(week, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        periods.addView(month, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        traffic.addView(periods);
         trafficRows = new LinearLayout(this);
         trafficRows.setOrientation(LinearLayout.VERTICAL);
         traffic.addView(trafficRows);
-        traffic.addView(button("إيقاف جمع إحصائيات الاستهلاك", () -> {
-            TrafficUsageStore.setSamplingEnabled(this, false);
-            trafficMetaView.setText("أُوقف جمع الإحصائيات. لم تتغير إعدادات الراوتر أو الحماية.");
-            renderTrafficUsage();
-        }));
-        traffic.addView(button("نسخ تقرير فحص الاستهلاك", this::copyTrafficProbeReport));
+        traffic.addView(button("نسخ تقرير فحص النشاط", this::copyTrafficProbeReport));
 
         LinearLayout inventory = addCard(col);
         inventory.addView(text("مقارنة قائمة السماح بالأجهزة المتصلة",18,true));
@@ -313,87 +297,116 @@ public final class MainActivity extends Activity {
         inventory.addView(text("لا تتغير إعدادات Wi-Fi أو DHCP أو Blacklist أو الرقابة الأبوية عند مزامنة Allow List.",11,false));
     }
 
-    /** Runs one bounded read-only probe; the long-term sampler is enabled only if real per-device rates are parsed. */
+    /** Performs one read-only compatibility check; live refreshes then share GuardService's existing router session. */
     private void probeTrafficMonitor() {
         try {
             if (GuardService.isRunning() || testingConnection || probingCompatibility
                     || loadingInventory || modifyingRouter || selectionBusy || trafficProbeBusy)
-                throw new IllegalStateException("أوقف الحارس والاختبارات والتعديلات أولاً؛ الراوتر قد يسمح بجلسة إدارة واحدة فقط");
+                throw new IllegalStateException("أوقف الحارس والاختبارات والتعديلات أولاً؛ الفحص الأولي يستخدم جلسة إدارة واحدة");
             requirePassword();
             String host = routerHost();
             String password = passwordField.getText().toString();
             requireSuccessfulReadTest(host, password);
             trafficProbeBusy = true;
             loadingInventory = true;
-            trafficMetaView.setText("جارٍ فحص Device Priority بطلب load للقراءة فقط؛ لن يتم تغيير QoS أو أي إعداد...");
+            trafficMetaView.setText("جارٍ فحص Device Priority ولقطة الأجهزة المتصلة بطلبات قراءة فقط...");
             new Thread(() -> {
                 RouterClient client = null;
                 try {
                     client = new RouterClient(this, host);
                     client.login(password);
                     TrafficMonitorProbe.Result result = client.readTrafficMonitorReadOnly();
-                    if (result.hasRates) {
-                        TrafficUsageStore.setSamplingEnabled(this, true);
-                        TrafficUsageStore.recordSamples(this, result.samples, System.currentTimeMillis());
+                    String onlineNote = "";
+                    if (result.endpointAnswered && result.hasRawRates) {
+                        LiveTrafficStore.setMonitoringEnabled(this, true);
+                        LiveTrafficStore.saveTrafficSamples(this, result.samples, System.currentTimeMillis());
                     } else {
-                        TrafficUsageStore.setSamplingEnabled(this, false);
+                        LiveTrafficStore.setMonitoringEnabled(this, false);
                     }
+                    try {
+                        RouterClient.ConnectedSnapshot snapshot = client.readConnectedDevices();
+                        if (snapshot.completeSections) {
+                            LiveTrafficStore.saveOnlineSnapshot(this, snapshot.devices, System.currentTimeMillis());
+                            onlineNote = "\nلقطة الاتصال مكتملة: " + snapshot.devices.size() + " جهازاً.";
+                        } else {
+                            onlineNote = "\nلقطة الاتصال غير مكتملة؛ لن نعتبر الأجهزة غير الظاهرة مفصولة.";
+                        }
+                    } catch (Exception snapshotError) {
+                        onlineNote = "\nتعذر تحديث حالة الاتصال من admin/status: "
+                                + AuthErrorLabel.safeValue(snapshotError.getMessage());
+                    }
+                    final String report = result.report + onlineNote;
                     ui.post(() -> {
-                        trafficProbeReport = result.report;
-                        trafficMetaView.setText(result.hasRates
-                                ? "نجح الفحص والتعرف على سرعات الأجهزة. أصبح الجمع التلقائي جاهزاً عند تشغيل الحارس الصارم."
-                                : "وصل رد من الراوتر، لكن لم يتم التعرف على سرعتي التنزيل والرفع بوحدات موثوقة. لم يُفعّل الجمع التلقائي.");
-                        log.add("فحص استهلاك البيانات (قراءة فقط): " + (result.hasRates
-                                ? "عُثر على معدلات رفع وتنزيل قابلة للقراءة" : "لم تُكتشف معدلات قابلة للقياس"));
-                        renderTrafficUsage();
+                        trafficProbeReport = report;
+                        trafficMetaView.setText(result.hasRawRates
+                                ? "نجح الفحص. رُصدت قيم رقمية خام للنشاط؛ سيُستخدم وجود قيمة أكبر من صفر كإشارة نشاط فقط، دون تحويلها إلى kbps. شغّل الحارس للتحديث التلقائي كل 15 ثانية عبر الجلسة نفسها."
+                                : "وصل رد من الراوتر، لكن قيم نشاط التنزيل والرفع غير مكتملة. لم تُفعّل المراقبة التلقائية.");
+                        log.add("فحص نشاط الشبكة (قراءة فقط): " + (result.hasRawRates
+                                ? "نجحت قراءة القيم الخام" : "لم تظهر قيم نشاط مكتملة"));
+                        renderLiveTraffic();
                         updateLists();
                     });
                 } catch (Exception error) {
                     String message = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
-                    TrafficUsageStore.setSamplingEnabled(this, false);
+                    LiveTrafficStore.setMonitoringEnabled(this, false);
                     ui.post(() -> {
-                        trafficProbeReport = "فشل فحص الاستهلاك: " + AuthErrorLabel.safeValue(message)
+                        trafficProbeReport = "فشل فحص نشاط الشبكة: " + AuthErrorLabel.safeValue(message)
                                 + "\nلم تُرسل أي أوامر كتابة أو تغيير إعدادات.";
-                        trafficMetaView.setText("تعذر قراءة مصدر الاستهلاك. راجع تقرير الفحص وسجل الأحداث؛ لم تتغير إعدادات الراوتر.");
-                        log.add("تعذر فحص استهلاك البيانات: " + AuthErrorLabel.safeValue(message));
-                        renderTrafficUsage();
+                        trafficMetaView.setText("تعذر قراءة مصدر نشاط الأجهزة. لم تتغير إعدادات الراوتر أو الحماية.");
+                        log.add("تعذر فحص نشاط الشبكة: " + AuthErrorLabel.safeValue(message));
+                        renderLiveTraffic();
                     });
                 } finally {
                     if (client != null) client.close();
                     ui.post(() -> { trafficProbeBusy = false; loadingInventory = false; updateLists(); });
                 }
-            }, "AX12-TrafficReadOnlyProbe").start();
+            }, "AX12-LiveTrafficReadOnlyProbe").start();
         } catch (Exception error) { error(error.getMessage()); }
     }
 
     private void copyTrafficProbeReport() {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        clipboard.setPrimaryClip(ClipData.newPlainText("AX12 Traffic Probe", trafficProbeReport));
-        error("نُسخ تقرير فحص الاستهلاك. يمكنك إرساله هنا للتحقق من حقول Firmware.");
+        if (clipboard == null) { error("الحافظة غير متاحة"); return; }
+        clipboard.setPrimaryClip(ClipData.newPlainText("AX12 Live Network Activity", trafficProbeReport));
+        error("نُسخ تقرير فحص النشاط. يمكنك إرساله للمراجعة.");
     }
 
-    private void renderTrafficUsage() {
+    private void renderLiveTraffic() {
         if (trafficRows == null || trafficSummaryView == null) return;
         trafficRows.removeAllViews();
-        int days = trafficPeriodDays;
-        String period = days == 1 ? "اليوم" : (days == 7 ? "آخر 7 أيام" : "آخر 30 يوماً");
-        boolean enabled = TrafficUsageStore.isSamplingEnabled(this);
-        trafficSummaryView.setText("الفترة: " + period + " | جمع العينات: "
-                + (enabled ? (GuardService.isRunning() ? "فعال مع الحارس" : "مهيأ؛ شغّل الحارس لجمع عينات مستمرة") : "غير مفعّل"));
-        List<TrafficUsageStore.Row> rows = TrafficUsageStore.getRows(this, days, System.currentTimeMillis());
+        long now = System.currentTimeMillis();
+        boolean enabled = LiveTrafficStore.isMonitoringEnabled(this);
+        long trafficTime = LiveTrafficStore.lastTrafficReadTime(this);
+        long onlineTime = LiveTrafficStore.lastOnlineReadTime(this);
+        String trafficAt = trafficTime > 0
+                ? DateFormat.getTimeInstance(DateFormat.MEDIUM, Locale.getDefault()).format(new Date(trafficTime))
+                : "لم تُقرأ";
+        String onlineAt = onlineTime > 0
+                ? DateFormat.getTimeInstance(DateFormat.MEDIUM, Locale.getDefault()).format(new Date(onlineTime))
+                : "لم تُقرأ";
+        trafficSummaryView.setText("مراقبة النشاط: " + (enabled
+                ? (GuardService.isRunning() ? "فعالة مع الحارس" : "مهيأة؛ شغّل الحارس للتحديث المستمر")
+                : "غير مفعّلة")
+                + "\nآخر قراءة نشاط: " + trafficAt + " | آخر قراءة اتصال: " + onlineAt);
+
+        List<LiveTrafficStore.Row> rows = LiveTrafficStore.getRows(this, now);
         if (rows.isEmpty()) {
-            trafficRows.addView(text("لا توجد قراءات سرعة محفوظة بعد. نفّذ فحص المصدر أولاً، ثم شغّل الحارس لجمع العينات.", 12, false));
+            trafficRows.addView(text("لا توجد لقطة حديثة للأجهزة. نفّذ الفحص الأولي ثم شغّل الحارس.", 12, false));
             return;
         }
-        int rank = 0;
-        for (TrafficUsageStore.Row row : rows) {
-            rank++;
+        int active = 0, idle = 0, offline = 0, unknown = 0;
+        for (LiveTrafficStore.Row row : rows) {
+            if (row.state == LiveTrafficStatus.State.ONLINE_ACTIVE) active++;
+            else if (row.state == LiveTrafficStatus.State.ONLINE_IDLE) idle++;
+            else if (row.state == LiveTrafficStatus.State.OFFLINE) offline++;
+            else unknown++;
+
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
             card.setPadding(12, 9, 12, 9);
             GradientDrawable shape = new GradientDrawable();
-            shape.setColor(Color.rgb(247, 250, 252));
+            shape.setColor(Color.WHITE);
             shape.setCornerRadius(13);
             shape.setStroke(1, Color.rgb(225, 233, 239));
             card.setBackground(shape);
@@ -401,19 +414,32 @@ public final class MainActivity extends Activity {
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             params.setMargins(0, 4, 0, 6);
             trafficRows.addView(card, params);
-            card.addView(text(rank + ". " + (row.name.isEmpty() ? row.mac : row.name), 14, true));
-            if (!row.name.isEmpty()) card.addView(text("MAC: " + row.mac, 11, false));
-            String rates = row.currentRateFresh
-                    ? "تنزيل: " + TrafficUsageStore.formatRate(row.downloadBytesPerSecond)
-                        + " | رفع: " + TrafficUsageStore.formatRate(row.uploadBytesPerSecond)
-                    : "السرعة الآنية: لا توجد قراءة حديثة";
-            card.addView(text(rates, 12, true));
-            card.addView(text("استهلاك " + period + ": تنزيل "
-                    + TrafficUsageStore.formatBytes(row.downloadBytes)
-                    + " | رفع " + TrafficUsageStore.formatBytes(row.uploadBytes)
-                    + " | المجموع " + TrafficUsageStore.formatBytes(row.totalBytes()), 12, false));
+
+            String displayName = row.name == null || row.name.trim().isEmpty() ? row.mac : row.name;
+            card.addView(text(displayName, 14, true));
+            if (row.name != null && !row.name.trim().isEmpty())
+                card.addView(text("MAC: " + row.mac, 11, false));
+            TextView status = text(LiveTrafficStatus.label(row.state), 13, true);
+            if (row.state == LiveTrafficStatus.State.ONLINE_ACTIVE)
+                status.setTextColor(Color.rgb(20, 140, 83));
+            else if (row.state == LiveTrafficStatus.State.ONLINE_IDLE)
+                status.setTextColor(Color.rgb(171, 119, 20));
+            else if (row.state == LiveTrafficStatus.State.OFFLINE)
+                status.setTextColor(Color.rgb(130, 140, 150));
+            else status.setTextColor(Color.rgb(100, 112, 124));
+            card.addView(status);
+            if (row.state == LiveTrafficStatus.State.ONLINE_ACTIVE
+                    || row.state == LiveTrafficStatus.State.ONLINE_IDLE
+                    || row.state == LiveTrafficStatus.State.ONLINE_RATE_UNKNOWN) {
+                card.addView(text("نشاط البيانات: " + row.activitySummary(), 12, false));
+            }
+            if (!row.ip.isEmpty()) card.addView(text("IP: " + row.ip
+                    + (row.medium.isEmpty() ? "" : " | النوع: " + row.medium), 11, false));
         }
-        trafficRows.addView(text("ملاحظة: المعدلات التراكمية تقديرية ومحلية، وتُحسب من عينات السرعة المتتالية فقط. الفترات التي لا تتوفر فيها عينات لا تُحتسب. يلزم استمرار خدمة الحارس لجمع البيانات أثناء إغلاق واجهة التطبيق.", 11, false));
+        trafficRows.addView(text("ملخص اللقطة: ينقل بيانات الآن " + active
+                + " | متصل دون نشاط ملحوظ " + idle + " | غير متصل " + offline
+                + " | غير معروف/قراءة قديمة " + unknown, 12, true));
+        trafficRows.addView(text("الحالة مبنية على آخر لقطة مكتملة من قائمة العملاء، وعلى كون قيم التنزيل/الرفع الخام صفراً أو أكبر من صفر. الصفر لا يعني الانقطاع. هذه ليست تجربة مستقلة لوصول الإنترنت إلى كل جهاز.", 11, false));
     }
 
     private void buildProtectionPage(LinearLayout col) {
@@ -561,7 +587,7 @@ public final class MainActivity extends Activity {
         if (authStateView != null) authStateView.setText(AuthAttemptGate.status(this));
         updateSelectionControls();
         updateDashboard();
-        renderTrafficUsage();
+        renderLiveTraffic();
     }
     private void copyTrustedList() {
         Set<String> macs = new java.util.LinkedHashSet<>(store.getStoredForReview());

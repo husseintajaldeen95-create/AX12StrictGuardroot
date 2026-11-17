@@ -176,6 +176,7 @@ public final class GuardService extends Service {
                 }
                 return;
             }
+            LiveTrafficStore.saveOnlineSnapshot(this, snapshot.devices, System.currentTimeMillis());
             if (deviceSnapshotWarningLogged) {
                 log.add("استعاد الراوتر لقطة كاملة للأجهزة المتصلة؛ استؤنف رصد الدخول والخروج");
                 deviceSnapshotWarningLogged = false;
@@ -276,6 +277,7 @@ public final class GuardService extends Service {
         String lastResult = "";
         String safetyPauseReason = "";
         int consecutiveFailures = 0;
+        int trafficReadFailures = 0;
         long presenceRetryUntilElapsed = 0L;
         boolean presenceBaselineResetRequired = false;
         long lastTrafficSampleElapsed = 0L;
@@ -404,31 +406,43 @@ public final class GuardService extends Service {
                             }
                         }
 
-                        // Optional read-only traffic sampling shares this existing admin session.
-                        // It is enabled only after a successful foreground compatibility probe.
-                        if (TrafficUsageStore.isSamplingEnabled(this)
+                        // Optional live-activity polling shares this existing admin session.
+                        // It stores only the latest raw per-device rates and never changes QoS or router settings.
+                        if (LiveTrafficStore.isMonitoringEnabled(this)
                                 && elapsedNow - lastTrafficSampleElapsed >= TRAFFIC_SAMPLE_INTERVAL_MS) {
                             lastTrafficSampleElapsed = elapsedNow;
                             try {
                                 TrafficMonitorProbe.Result traffic = client.readTrafficMonitorReadOnly();
-                                if (traffic.hasRates) {
-                                    TrafficUsageStore.recordSamples(this, traffic.samples, System.currentTimeMillis());
+                                if (traffic.endpointAnswered && traffic.hasRawRates) {
+                                    LiveTrafficStore.saveTrafficSamples(this, traffic.samples, System.currentTimeMillis());
+                                    trafficReadFailures = 0;
                                     if (trafficSamplingWarningLogged) {
-                                        log.add("استؤنف رصد استهلاك البيانات من معدلات الراوتر الفعلية");
+                                        log.add("استؤنفت قراءة نشاط التنزيل والرفع اللحظي من الراوتر");
                                         trafficSamplingWarningLogged = false;
                                     }
                                 } else {
-                                    TrafficUsageStore.setSamplingEnabled(this, false);
+                                    trafficReadFailures++;
                                     if (!trafficSamplingWarningLogged) {
-                                        log.add("أوقفت جمع استهلاك البيانات لأن Firmware لم يعد يعيد معدلات رفع وتنزيل قابلة للتفسير؛ لم تتغير إعدادات الراوتر، واستمرت حماية Allow List.");
+                                        log.add("لم تُرجع قراءة النشاط قيماً رقمية مكتملة؛ سأعيد المحاولة دون التأثير على حماية Allow List.");
                                         trafficSamplingWarningLogged = true;
+                                    }
+                                    if (trafficReadFailures >= 3) {
+                                        LiveTrafficStore.setMonitoringEnabled(this, false);
+                                        log.add("أوقفت مراقبة النشاط الاختيارية بعد ثلاث قراءات متتالية غير مكتملة؛ أعد فحص المصدر يدوياً لتفعيلها مجدداً.");
                                     }
                                 }
                             } catch (Exception trafficError) {
-                                TrafficUsageStore.setSamplingEnabled(this, false);
-                                log.add("أوقفت ميزة جمع الاستهلاك بعد تعذر قراءة مصدرها؛ لم أغيّر إعدادات الراوتر. "
-                                        + "استمرار الحماية الأساسية مستقل عن هذه الميزة: " + safeMessage(trafficError));
                                 if (client.isSessionInvalid()) throw trafficError;
+                                trafficReadFailures++;
+                                if (!trafficSamplingWarningLogged) {
+                                    log.add("تعذرت قراءة نشاط الأجهزة مؤقتاً؛ سأعيد المحاولة، ولم أغيّر إعدادات الراوتر: "
+                                            + safeMessage(trafficError));
+                                    trafficSamplingWarningLogged = true;
+                                }
+                                if (trafficReadFailures >= 3) {
+                                    LiveTrafficStore.setMonitoringEnabled(this, false);
+                                    log.add("أوقفت مراقبة النشاط الاختيارية بعد ثلاث محاولات فاشلة؛ استمرت حماية Allow List.");
+                                }
                             }
                         }
 

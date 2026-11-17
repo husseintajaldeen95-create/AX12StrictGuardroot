@@ -17,9 +17,14 @@ for token in \
   'this::probeParentalControls' \
   'this::testConnection' \
   'this::probeTrafficMonitor' \
-  'renderTrafficUsage()' \
-  'TrafficUsageStore.isSamplingEnabled(this)' \
-  'client.readTrafficMonitorReadOnly()'; do
+  'renderLiveTraffic()' \
+  'LiveTrafficStore.isMonitoringEnabled(this)' \
+  'client.readTrafficMonitorReadOnly()' \
+  'LiveTrafficStore.saveOnlineSnapshot(this, snapshot.devices, System.currentTimeMillis())'; do
   grep -Fq "$token" "$UI" || { echo "FAIL: missing UI feature hook: $token"; exit 1; }
 done
-printf '%s\n' 'PASS: dashboard/navigation/feature-preservation and traffic-monitor hooks'
+if grep -Eq 'TrafficUsageStore|renderTrafficUsage|30 يوماً|آخر 7 أيام|إحصائيات الاستهلاك' "$UI"; then
+  echo 'FAIL: cumulative traffic UI remains in MainActivity.java'
+  exit 1
+fi
+printf '%s\n' 'PASS: dashboard/navigation/feature-preservation and live-traffic hooks'
