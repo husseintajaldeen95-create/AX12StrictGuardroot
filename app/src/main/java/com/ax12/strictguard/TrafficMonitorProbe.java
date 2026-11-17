@@ -112,10 +112,34 @@ public final class TrafficMonitorProbe {
             report.append(field);
             if (count >= 45) { report.append(", …"); break; }
         }
-        if (rateCount == 0) report.append("\nلم أتعرف على حقلي سرعة التنزيل والرفع بوحدات صريحة؛ لن أحوّل قيماً مجهولة الوحدة إلى أرقام استهلاك.");
-        else report.append("\nتم التعرف على معدلات الرفع والتنزيل؛ يمكن بدء الجمع التراكمي المحلي عند تشغيل الحارس.");
+        if (rateCount == 0) {
+            report.append("\nلم أتعرف بعد على سرعتي التنزيل والرفع بوحدات صريحة؛ لن أحوّل قيماً مجهولة الوحدة إلى أرقام استهلاك.");
+            report.append("\nعينات القيم الخام لأول ثلاثة سجلات (للتشخيص فقط، دون افتراض وحدة):");
+            for (int i = 0; i < samples.size() && i < 3; i++) {
+                Sample sample = samples.get(i);
+                JSONObject row = findRowByMac(rows, sample.mac);
+                if (row == null) continue;
+                report.append("\n").append(maskedMac(sample.mac)).append(" | ")
+                        .append(rawFieldDiagnostic(row, "downloadSpeed", "download_speed", "download_rate"))
+                        .append(" | ").append(rawFieldDiagnostic(row, "uploadSpeed", "upload_speed", "upload_rate"))
+                        .append(" | ").append(rawFieldDiagnostic(row, "trafficUsage", "traffic_usage"));
+            }
+            report.append("\nأرسل التقرير بعد إجراء تنزيل ورفع تجريبيين على جهاز واحد؛ ستساعد مقارنة القيم قبل/أثناء النقل على تحديد طبيعة الحقول، دون تخمين وحداتها.");
+        } else {
+            report.append("\nتم التعرف على معدلات الرفع والتنزيل بوحدات صريحة؛ يمكن بدء الجمع التراكمي المحلي عند تشغيل الحارس.");
+        }
         report.append("\nالعملية قراءة فقط؛ لم يتم تفعيل QoS أو تغيير أولوية أي جهاز.");
         return new Result(true, samples, report.toString());
+    }
+
+    private static JSONObject findRowByMac(List<JSONObject> rows, String targetMac) {
+        for (JSONObject row : rows) {
+            String candidate = value(row, MAC_KEYS);
+            try {
+                if (MacPolicy.normalize(candidate).equals(targetMac)) return row;
+            } catch (Exception ignored) { }
+        }
+        return null;
     }
 
     private static String safeError(JSONObject response) {
@@ -168,7 +192,7 @@ public final class TrafficMonitorProbe {
             Iterator<String> keys = row.keys();
             while (keys.hasNext()) {
                 String key = keys.next();
-                if (alias.equalsIgnoreCase(key)) {
+                if (TrafficFieldNames.matches(key, alias)) {
                     Object value = row.opt(key);
                     if (value instanceof String || value instanceof Number) return String.valueOf(value).trim();
                 }
@@ -182,12 +206,36 @@ public final class TrafficMonitorProbe {
             Iterator<String> keys = row.keys();
             while (keys.hasNext()) {
                 String key = keys.next();
-                if (!alias.equalsIgnoreCase(key)) continue;
+                if (!TrafficFieldNames.matches(key, alias)) continue;
                 double parsed = parseRate(row.opt(key), key);
                 if (Double.isFinite(parsed)) return parsed;
             }
         }
         return Double.NaN;
+    }
+
+    private static String rawFieldDiagnostic(JSONObject row, String... aliases) {
+        for (String alias : aliases) {
+            Iterator<String> keys = row.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (!TrafficFieldNames.matches(key, alias)) continue;
+                Object value = row.opt(key);
+                if (value == null || value == JSONObject.NULL) return key + "=null";
+                String type = value instanceof Number ? "Number"
+                        : value instanceof String ? "String"
+                        : value instanceof Boolean ? "Boolean" : value.getClass().getSimpleName();
+                String rendered = String.valueOf(value).replaceAll("[\r\n\t]", " ").trim();
+                if (rendered.length() > 72) rendered = rendered.substring(0, 72) + "…";
+                return key + "=" + rendered + " (" + type + ")";
+            }
+        }
+        return "غير موجود";
+    }
+
+    private static String maskedMac(String mac) {
+        if (mac == null || mac.length() < 8) return "MAC مخفي";
+        return mac.substring(0, 8) + "-**-**-**";
     }
 
     /** Convert only explicit rate units. Bare numbers are intentionally not guessed. */

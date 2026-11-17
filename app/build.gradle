@@ -7,8 +7,8 @@ android {
         applicationId 'com.ax12.strictguard'
         minSdk 26
         targetSdk 32
-        versionCode 17
-        versionName '0.2.6-traffic-monitor'
+        versionCode 18
+        versionName '0.2.6.1-traffic-field-diagnostics'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
