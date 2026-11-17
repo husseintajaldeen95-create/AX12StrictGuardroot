@@ -54,6 +54,11 @@ public final class MainActivity extends Activity {
     private TextView[] navItems;
     private TextView dashboardGuardView, dashboardRouterView, dashboardSummaryView;
     private LinearLayout dashboardChart;
+    private TextView trafficMetaView, trafficSummaryView;
+    private LinearLayout trafficRows;
+    private String trafficProbeReport = "لم يُجرَ فحص استهلاك البيانات بعد.";
+    private int trafficPeriodDays = 1;
+    private boolean trafficProbeBusy = false;
     private int activeTab = 0;
     private Button applySelectionButton;
     private TrustedStore store;
@@ -263,6 +268,34 @@ public final class MainActivity extends Activity {
         trusted.addView(button("إرسال MAC معتمد إلى الراوتر (بموافقة صريحة)",this::confirmAllow));
         trustedView=text("",14,false);trusted.addView(trustedView);
 
+        LinearLayout traffic = addCard(col);
+        traffic.addView(text("مراقبة استهلاك البيانات", 18, true));
+        traffic.addView(text("قراءة السرعة الآنية لكل جهاز، ثم تجميع تقديري يومي وأسبوعي وشهري من العينات الفعلية. قد تتطلب واجهة Device Priority تفعيل QoS يدوياً في الراوتر؛ التطبيق لن يفعّله أو يغيّر أولوية الأجهزة تلقائياً.", 12, false));
+        traffic.addView(button("فحص مصدر الاستهلاك من الراوتر (قراءة فقط)", this::probeTrafficMonitor));
+        trafficMetaView = text("لم يُفحص مصدر بيانات السرعة بعد. أوقف الحارس مؤقتاً قبل الفحص حتى لا تتعارض جلسات الإدارة.", 12, false);
+        traffic.addView(trafficMetaView);
+        trafficSummaryView = text("لا توجد قراءات استهلاك محفوظة بعد.", 13, true);
+        traffic.addView(trafficSummaryView);
+        LinearLayout periods = new LinearLayout(this);
+        periods.setOrientation(LinearLayout.HORIZONTAL);
+        periods.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        Button today = button("اليوم", () -> { trafficPeriodDays = 1; renderTrafficUsage(); });
+        Button week = button("7 أيام", () -> { trafficPeriodDays = 7; renderTrafficUsage(); });
+        Button month = button("30 يوماً", () -> { trafficPeriodDays = 30; renderTrafficUsage(); });
+        periods.addView(today, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        periods.addView(week, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        periods.addView(month, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        traffic.addView(periods);
+        trafficRows = new LinearLayout(this);
+        trafficRows.setOrientation(LinearLayout.VERTICAL);
+        traffic.addView(trafficRows);
+        traffic.addView(button("إيقاف جمع إحصائيات الاستهلاك", () -> {
+            TrafficUsageStore.setSamplingEnabled(this, false);
+            trafficMetaView.setText("أُوقف جمع الإحصائيات. لم تتغير إعدادات الراوتر أو الحماية.");
+            renderTrafficUsage();
+        }));
+        traffic.addView(button("نسخ تقرير فحص الاستهلاك", this::copyTrafficProbeReport));
+
         LinearLayout inventory = addCard(col);
         inventory.addView(text("مقارنة قائمة السماح بالأجهزة المتصلة",18,true));
         inventory.addView(text("تُعرض حالة قائمة السماح في الراوتر، والظهور في آخر قراءة، والاعتماد المحلي. هذه لقطة وقت القراءة وليست مراقبة آنية.",12,false));
@@ -278,6 +311,109 @@ public final class MainActivity extends Activity {
         applySelectionButton.setEnabled(false);inventory.addView(applySelectionButton);
         inventory.addView(button("التراجع عن التحديدات غير المحفوظة",this::discardSelectionChanges));
         inventory.addView(text("لا تتغير إعدادات Wi-Fi أو DHCP أو Blacklist أو الرقابة الأبوية عند مزامنة Allow List.",11,false));
+    }
+
+    /** Runs one bounded read-only probe; the long-term sampler is enabled only if real per-device rates are parsed. */
+    private void probeTrafficMonitor() {
+        try {
+            if (GuardService.isRunning() || testingConnection || probingCompatibility
+                    || loadingInventory || modifyingRouter || selectionBusy || trafficProbeBusy)
+                throw new IllegalStateException("أوقف الحارس والاختبارات والتعديلات أولاً؛ الراوتر قد يسمح بجلسة إدارة واحدة فقط");
+            requirePassword();
+            String host = routerHost();
+            String password = passwordField.getText().toString();
+            requireSuccessfulReadTest(host, password);
+            trafficProbeBusy = true;
+            loadingInventory = true;
+            trafficMetaView.setText("جارٍ فحص Device Priority بطلب load للقراءة فقط؛ لن يتم تغيير QoS أو أي إعداد...");
+            new Thread(() -> {
+                RouterClient client = null;
+                try {
+                    client = new RouterClient(this, host);
+                    client.login(password);
+                    TrafficMonitorProbe.Result result = client.readTrafficMonitorReadOnly();
+                    if (result.hasRates) {
+                        TrafficUsageStore.setSamplingEnabled(this, true);
+                        TrafficUsageStore.recordSamples(this, result.samples, System.currentTimeMillis());
+                    } else {
+                        TrafficUsageStore.setSamplingEnabled(this, false);
+                    }
+                    ui.post(() -> {
+                        trafficProbeReport = result.report;
+                        trafficMetaView.setText(result.hasRates
+                                ? "نجح الفحص والتعرف على سرعات الأجهزة. أصبح الجمع التلقائي جاهزاً عند تشغيل الحارس الصارم."
+                                : "وصل رد من الراوتر، لكن لم يتم التعرف على سرعتي التنزيل والرفع بوحدات موثوقة. لم يُفعّل الجمع التلقائي.");
+                        log.add("فحص استهلاك البيانات (قراءة فقط): " + (result.hasRates
+                                ? "عُثر على معدلات رفع وتنزيل قابلة للقراءة" : "لم تُكتشف معدلات قابلة للقياس"));
+                        renderTrafficUsage();
+                        updateLists();
+                    });
+                } catch (Exception error) {
+                    String message = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+                    TrafficUsageStore.setSamplingEnabled(this, false);
+                    ui.post(() -> {
+                        trafficProbeReport = "فشل فحص الاستهلاك: " + AuthErrorLabel.safeValue(message)
+                                + "\nلم تُرسل أي أوامر كتابة أو تغيير إعدادات.";
+                        trafficMetaView.setText("تعذر قراءة مصدر الاستهلاك. راجع تقرير الفحص وسجل الأحداث؛ لم تتغير إعدادات الراوتر.");
+                        log.add("تعذر فحص استهلاك البيانات: " + AuthErrorLabel.safeValue(message));
+                        renderTrafficUsage();
+                    });
+                } finally {
+                    if (client != null) client.close();
+                    ui.post(() -> { trafficProbeBusy = false; loadingInventory = false; updateLists(); });
+                }
+            }, "AX12-TrafficReadOnlyProbe").start();
+        } catch (Exception error) { error(error.getMessage()); }
+    }
+
+    private void copyTrafficProbeReport() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(ClipData.newPlainText("AX12 Traffic Probe", trafficProbeReport));
+        error("نُسخ تقرير فحص الاستهلاك. يمكنك إرساله هنا للتحقق من حقول Firmware.");
+    }
+
+    private void renderTrafficUsage() {
+        if (trafficRows == null || trafficSummaryView == null) return;
+        trafficRows.removeAllViews();
+        int days = trafficPeriodDays;
+        String period = days == 1 ? "اليوم" : (days == 7 ? "آخر 7 أيام" : "آخر 30 يوماً");
+        boolean enabled = TrafficUsageStore.isSamplingEnabled(this);
+        trafficSummaryView.setText("الفترة: " + period + " | جمع العينات: "
+                + (enabled ? (GuardService.isRunning() ? "فعال مع الحارس" : "مهيأ؛ شغّل الحارس لجمع عينات مستمرة") : "غير مفعّل"));
+        List<TrafficUsageStore.Row> rows = TrafficUsageStore.getRows(this, days, System.currentTimeMillis());
+        if (rows.isEmpty()) {
+            trafficRows.addView(text("لا توجد قراءات سرعة محفوظة بعد. نفّذ فحص المصدر أولاً، ثم شغّل الحارس لجمع العينات.", 12, false));
+            return;
+        }
+        int rank = 0;
+        for (TrafficUsageStore.Row row : rows) {
+            rank++;
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+            card.setPadding(12, 9, 12, 9);
+            GradientDrawable shape = new GradientDrawable();
+            shape.setColor(Color.rgb(247, 250, 252));
+            shape.setCornerRadius(13);
+            shape.setStroke(1, Color.rgb(225, 233, 239));
+            card.setBackground(shape);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            params.setMargins(0, 4, 0, 6);
+            trafficRows.addView(card, params);
+            card.addView(text(rank + ". " + (row.name.isEmpty() ? row.mac : row.name), 14, true));
+            if (!row.name.isEmpty()) card.addView(text("MAC: " + row.mac, 11, false));
+            String rates = row.currentRateFresh
+                    ? "تنزيل: " + TrafficUsageStore.formatRate(row.downloadBytesPerSecond)
+                        + " | رفع: " + TrafficUsageStore.formatRate(row.uploadBytesPerSecond)
+                    : "السرعة الآنية: لا توجد قراءة حديثة";
+            card.addView(text(rates, 12, true));
+            card.addView(text("استهلاك " + period + ": تنزيل "
+                    + TrafficUsageStore.formatBytes(row.downloadBytes)
+                    + " | رفع " + TrafficUsageStore.formatBytes(row.uploadBytes)
+                    + " | المجموع " + TrafficUsageStore.formatBytes(row.totalBytes()), 12, false));
+        }
+        trafficRows.addView(text("ملاحظة: المعدلات التراكمية تقديرية ومحلية، وتُحسب من عينات السرعة المتتالية فقط. الفترات التي لا تتوفر فيها عينات لا تُحتسب. يلزم استمرار خدمة الحارس لجمع البيانات أثناء إغلاق واجهة التطبيق.", 11, false));
     }
 
     private void buildProtectionPage(LinearLayout col) {
@@ -425,6 +561,7 @@ public final class MainActivity extends Activity {
         if (authStateView != null) authStateView.setText(AuthAttemptGate.status(this));
         updateSelectionControls();
         updateDashboard();
+        renderTrafficUsage();
     }
     private void copyTrustedList() {
         Set<String> macs = new java.util.LinkedHashSet<>(store.getStoredForReview());

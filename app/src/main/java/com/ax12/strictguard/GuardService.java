@@ -32,6 +32,7 @@ public final class GuardService extends Service {
     private static final int MAX_REMOVALS_PER_CYCLE = 1;
     // The optional admin/status endpoint must not repeatedly break the core allow-list guard.
     private static final long DEVICE_PRESENCE_RETRY_MS = 5L * 60L * 1000L;
+    private static final long TRAFFIC_SAMPLE_INTERVAL_MS = 15000L;
     private volatile boolean active = false;
     private static volatile boolean running = false;
     private volatile boolean explicitStopRequested = false;
@@ -277,6 +278,8 @@ public final class GuardService extends Service {
         int consecutiveFailures = 0;
         long presenceRetryUntilElapsed = 0L;
         boolean presenceBaselineResetRequired = false;
+        long lastTrafficSampleElapsed = 0L;
+        boolean trafficSamplingWarningLogged = false;
 
         // Keep the foreground service alive while router sessions are renewed. A lost
         // session is not the same as a user-requested stop.
@@ -398,6 +401,34 @@ public final class GuardService extends Service {
                                 log.add("تعذر رصد الأجهزة عبر admin/status: " + safeMessage(endpointError)
                                         + ". أوقفت هذا الفحص الاختياري لمدة 5 دقائق؛ ستستمر حماية Allow List.");
                                 update("الحارس مستمر في حماية القائمة البيضاء؛ رصد الأجهزة متوقف مؤقتاً");
+                            }
+                        }
+
+                        // Optional read-only traffic sampling shares this existing admin session.
+                        // It is enabled only after a successful foreground compatibility probe.
+                        if (TrafficUsageStore.isSamplingEnabled(this)
+                                && elapsedNow - lastTrafficSampleElapsed >= TRAFFIC_SAMPLE_INTERVAL_MS) {
+                            lastTrafficSampleElapsed = elapsedNow;
+                            try {
+                                TrafficMonitorProbe.Result traffic = client.readTrafficMonitorReadOnly();
+                                if (traffic.hasRates) {
+                                    TrafficUsageStore.recordSamples(this, traffic.samples, System.currentTimeMillis());
+                                    if (trafficSamplingWarningLogged) {
+                                        log.add("استؤنف رصد استهلاك البيانات من معدلات الراوتر الفعلية");
+                                        trafficSamplingWarningLogged = false;
+                                    }
+                                } else {
+                                    TrafficUsageStore.setSamplingEnabled(this, false);
+                                    if (!trafficSamplingWarningLogged) {
+                                        log.add("أوقفت جمع استهلاك البيانات لأن Firmware لم يعد يعيد معدلات رفع وتنزيل قابلة للتفسير؛ لم تتغير إعدادات الراوتر، واستمرت حماية Allow List.");
+                                        trafficSamplingWarningLogged = true;
+                                    }
+                                }
+                            } catch (Exception trafficError) {
+                                TrafficUsageStore.setSamplingEnabled(this, false);
+                                log.add("أوقفت ميزة جمع الاستهلاك بعد تعذر قراءة مصدرها؛ لم أغيّر إعدادات الراوتر. "
+                                        + "استمرار الحماية الأساسية مستقل عن هذه الميزة: " + safeMessage(trafficError));
+                                if (client.isSessionInvalid()) throw trafficError;
                             }
                         }
 

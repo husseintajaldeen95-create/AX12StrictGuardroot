@@ -15,7 +15,11 @@ for token in \
   'this::stopGuard' \
   'this::applySelectionToRouter' \
   'this::probeParentalControls' \
-  'this::testConnection'; do
+  'this::testConnection' \
+  'this::probeTrafficMonitor' \
+  'renderTrafficUsage()' \
+  'TrafficUsageStore.isSamplingEnabled(this)' \
+  'client.readTrafficMonitorReadOnly()'; do
   grep -Fq "$token" "$UI" || { echo "FAIL: missing UI feature hook: $token"; exit 1; }
 done
-printf '%s\n' 'PASS: 13 dashboard/navigation/feature-preservation checks'
+printf '%s\n' 'PASS: dashboard/navigation/feature-preservation and traffic-monitor hooks'

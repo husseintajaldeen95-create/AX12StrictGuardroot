@@ -890,6 +890,34 @@ public final class RouterClient {
         }
     }
 
+    /**
+     * Read-only traffic candidate for the Archer AX12 Smart Network Device Priority table.
+     * This method is intentionally limited to one audited endpoint and the load verb.
+     * It never enables QoS, changes priorities, or modifies router configuration.
+     */
+    public TrafficMonitorProbe.Result readTrafficMonitorReadOnly() throws Exception {
+        final String route = "admin/smart_network";
+        final String formName = "device_priority";
+        final String operation = "load";
+        if (sessionInvalid)
+            throw new IllegalStateException("جلسة الراوتر غير موثوقة؛ أُوقف فحص استهلاك البيانات");
+        Map<String, String> fields = form("operation", operation);
+        JSONObject response;
+        try {
+            String path = route + "?form=" + formName;
+            response = enhancedMode
+                    ? requestEnhanced(path, fields, false)
+                    : requestPlain(path, fields, false, false, false);
+        } catch (Exception error) {
+            if (!isHttpNotFound(error)) {
+                sessionInvalid = true;
+                AuthAttemptGate.markDenied(appContext, error);
+            }
+            throw error;
+        }
+        return TrafficMonitorProbe.parse(response);
+    }
+
     private static boolean isHttpNotFound(Exception error) {
         String message = error == null ? "" : error.getMessage();
         return message != null && message.contains("HTTP 404");
